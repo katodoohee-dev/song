@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Home, Search, Library, Mic2, Play, Pause, Heart, ChevronRight, Sparkles, MoreHorizontal, X, Plus, Volume2, Shuffle, SkipBack, SkipForward, Repeat2, Upload, Link2, Music2 } from "lucide-react";
+import { Home, Search, Library, Mic2, Play, Pause, Heart, ChevronRight, Sparkles, MoreHorizontal, X, Plus, Volume2, Shuffle, SkipBack, SkipForward, Repeat2, Upload, Link2, Music2, CheckCircle2 } from "lucide-react";
 import { AuthPanel } from "./auth-panel";
+import { uploadFile, type StorageObject } from "./storage";
 import "./styles.css";
 
 type Song={title:string;artist:string;note:string;image:string};
@@ -31,8 +32,19 @@ function App(){
   {view!=='karaoke'&&<Player song={song} playing={playing} onToggle={()=>setPlaying(v=>!v)} onLyrics={()=>setLyrics(true)} onKaraoke={()=>setView('karaoke')}/>} 
   {view!=='karaoke'&&<nav className="mobileNav">{nav.map(([id,label,Icon])=><button key={id} className={view===id?'mobileNavItem active':'mobileNavItem'} onClick={()=>setView(id)}><Icon size={18}/><span>{label}</span></button>)}</nav>}
   {lyrics&&<div className="overlay"><div className="overlayTop"><button className="iconBtn" onClick={()=>setLyrics(false)}><X/></button><div><b>{song.title}</b><span>{song.artist}</span></div><MoreHorizontal/></div><div className="lyrics"><p className="faint">I still remember the night we met</p><h2><span>ฉัน ยัง รอ </span><em>เธอ</em><span> อยู่ ตรง นี้</span></h2><p className="en">I’m still waiting right here</p><p className="faint">แม้เวลาจะผ่านไปนานเท่าไร</p></div><button className="primary" onClick={()=>{setLyrics(false);setView('karaoke')}}><Mic2 size={17}/> Karaoke</button></div>}
-  {add&&<div className="modalShade" onClick={()=>setAdd(false)}><div className="modal" onClick={e=>e.stopPropagation()}><div className="record"><Music2 size={34}/><span>SONG NOTE</span></div><div className="modalBody"><h2>Add Music</h2><p>Bring a song into your library.</p><button className="primary wide"><Upload size={17}/> Upload music</button><button className="secondary wide"><Link2 size={17}/> Paste a link</button><button className="ghost wide" onClick={()=>setAdd(false)}>Close</button></div></div></div>}
+  {add&&<AddMusicModal onClose={()=>setAdd(false)}/>} 
  </div>
+}
+
+function AddMusicModal({onClose}:{onClose:()=>void}){
+ const [busy,setBusy]=useState(false); const [message,setMessage]=useState(''); const [uploaded,setUploaded]=useState<StorageObject|null>(null);
+ const handleFile=async(e:React.ChangeEvent<HTMLInputElement>)=>{
+  const file=e.target.files?.[0]; if(!file)return; setBusy(true); setMessage(''); setUploaded(null);
+  try { setUploaded(await uploadFile(file)); setMessage('Upload complete.'); }
+  catch(error){ setMessage(error instanceof Error?error.message:'Upload failed.'); }
+  finally { setBusy(false); e.target.value=''; }
+ };
+ return <div className="modalShade" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}><div className="record"><Music2 size={34}/><span>SONG NOTE</span></div><div className="modalBody"><h2>Add Music</h2><p>Bring a song into your library.</p><label className="primary wide" style={{cursor:busy?'wait':'pointer',opacity:busy?.6:1}}><Upload size={17}/>{busy?'Uploading…':'Upload music'}<input type="file" accept="audio/*" hidden disabled={busy} onChange={handleFile}/></label>{uploaded&&<div style={{display:'flex',alignItems:'center',gap:8,margin:'10px 0',color:'#d8ff66',fontSize:13}}><CheckCircle2 size={17}/><span>{uploaded.filename}</span></div>}{message&&<div style={{margin:'10px 0',fontSize:13,color:message==='Upload complete.'?'#d8ff66':'#ff8e8e'}}>{message}</div>}<button className="secondary wide"><Link2 size={17}/> Paste a link</button><button className="ghost wide" onClick={onClose}>Close</button></div></div></div>
 }
 function HomeView({onPlay}:{onPlay:(s:Song)=>void}){return <section><p className="eyebrow">Good evening</p><h1>What do you want to hear?</h1><div className="hero"><img src={songs[0].image}/><div className="shade"/><div className="heroText"><p className="eyebrow"><Sparkles size={13}/> Continue listening</p><h2>Moonlit Echoes</h2><p>Luna Vale · Aurora Sessions</p><div><button className="primary" onClick={()=>onPlay(songs[0])}><Play size={16} fill="currentColor"/> Play</button><button className="secondary circle"><Heart size={17}/></button></div></div></div><Section title="Recently played"><div className="grid">{songs.slice(0,4).map(s=><Card key={s.title} song={s} onPlay={onPlay}/>)}</div></Section><Section title="Trending now"><div className="rows">{songs.slice(0,4).map((s,i)=><Row key={s.title} song={s} n={i+1} onPlay={onPlay}/>)}</div></Section></section>}
 function SearchView({query,setQuery,songs,onPlay}:{query:string;setQuery:(v:string)=>void;songs:Song[];onPlay:(s:Song)=>void}){return <section><h1>Search</h1><div className="search"><Search size={19}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Songs, artists, albums, playlists"/>{query&&<button onClick={()=>setQuery('')}><X size={17}/></button>}</div>{!query?<><Section title="Explore by mood"><div className="moods"><div>Calm</div><div>After dark</div><div>Sing along</div></div></Section></>:<div className="rows top">{songs.map((s,i)=><Row key={s.title} song={s} n={i+1} onPlay={onPlay}/>)}</div>}</section>}
