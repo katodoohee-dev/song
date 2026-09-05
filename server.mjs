@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { readFile, writeFile, rename } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -19,6 +20,7 @@ let localWrite = Promise.resolve();
 const types = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.ico':'image/x-icon','.woff':'font/woff','.woff2':'font/woff2' };
 
 const sendJson = (res, status, payload, headers = {}) => {
+  if (res.headersSent) return;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(payload));
 };
@@ -27,7 +29,7 @@ const readBody = req => new Promise((resolve, reject) => {
   let raw = '';
   req.on('data', chunk => {
     raw += chunk;
-    if (raw.length > 100_000) reject(Object.assign(new Error('Request body too large'), { status: 413 }));
+    if (raw.length > 100_000) { reject(Object.assign(new Error('Request body too large'), { status: 413 })); req.destroy(); }
   });
   req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(Object.assign(new Error('Invalid JSON'), { status: 400 })); } });
   req.on('error', reject);
@@ -113,7 +115,6 @@ async function authRoute(req, res, pathname) {
       user = cleanUser(stored);
     }
     const session = await createSession(user.id);
-    if (!pool) await persistLocalData();
     return sendJson(res, 201, { user }, { 'Set-Cookie': sessionCookie(session.id, session.expires) });
   }
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -164,10 +165,15 @@ const server = http.createServer(async (req, res) => {
     try { await readFile(file); } catch { file = join(root, 'index.html'); }
     const type = types[extname(file).toLowerCase()] || 'application/octet-stream';
     res.writeHead(200, { 'Content-Type': type, 'Cache-Control': file.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable' });
-    createReadStream(file).pipe(res);
+    createReadStream(file).on('error', error => {
+      console.error(error);
+      if (!res.headersSent) sendJson(res, 500, { error: 'Internal server error' });
+      else res.destroy(error);
+    }).pipe(res);
   } catch (error) {
     console.error(error);
-    sendJson(res, error.status || 500, { error: 'Internal server error' });
+    if (!res.headersSent) sendJson(res, error.status || 500, { error: 'Internal server error' });
+    else res.destroy(error);
   }
 });
 
