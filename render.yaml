@@ -8,6 +8,23 @@ services:
     envVars:
       - key: NODE_VERSION
         value: '22'
+      - key: VITE_AUTH_API_URL
+        value: https://song-note-auth-api.onrender.com
+
+  - type: web
+    name: song-note-auth-api
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: node auth-server.mjs
+    envVars:
+      - key: NODE_VERSION
+        value: '22'
+      - key: FRONTEND_ORIGIN
+        value: https://song-note-frontend.onrender.com
+      - key: STORAGE_DIR
+        value: /var/data/song-note
       - key: DATABASE_URL
         fromDatabase:
           name: song-note-database
