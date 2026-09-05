@@ -67,7 +67,8 @@ const loadLocalData = async () => {
     localData = { users: Array.isArray(parsed.users) ? parsed.users : [], sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [] };
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    await persistLocalData();
+    // Start with an empty in-memory store. The first write creates the file lazily.
+    localData = { users: [], sessions: [] };
   }
 };
 const persistLocalData = async () => {
