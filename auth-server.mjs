@@ -2,6 +2,9 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
+import { mkdir, readFile as readStorageFile, unlink, writeFile as writeStorageFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const { Pool } = pg;
 const port = Number(process.env.PORT || 10000);
@@ -11,6 +14,8 @@ const cookieName = 'song_note_session';
 const sessionDays = 30;
 const connectionString = process.env.DATABASE_URL || '';
 const pool = connectionString ? new Pool({ connectionString, max: 5, ssl: isProd ? { rejectUnauthorized: false } : undefined }) : null;
+const storageRoot = process.env.STORAGE_DIR || join(fileURLToPath(new URL('.', import.meta.url)), 'storage-data');
+const maxUploadBytes = 50 * 1024 * 1024;
 
 const send = (res, status, payload, headers = {}) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -67,6 +72,8 @@ const initDatabase = async () => {
   requireDb();
   const schema = await readFile(new URL('./db/schema.sql', import.meta.url), 'utf8');
   await pool.query(schema);
+  const storageSchema = await readFile(new URL('./db/storage.sql', import.meta.url), 'utf8');
+  await pool.query(storageSchema);
 };
 
 const createSession = async (userId) => {
@@ -91,6 +98,22 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
+const readBinary = (req, limit) => new Promise((resolve, reject) => {
+  const chunks = [];
+  let total = 0;
+  req.on('data', (chunk) => {
+    total += chunk.length;
+    if (total > limit) {
+      reject(Object.assign(new Error('File is too large. Maximum size is 50 MB.'), { status: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => resolve(Buffer.concat(chunks)));
+  req.on('error', reject);
+});
+
 const currentUser = async (req) => {
   requireDb();
   const sid = parseCookies(req.headers.cookie)[cookieName];
@@ -106,6 +129,24 @@ const currentUser = async (req) => {
   return cleanUser(result.rows[0]);
 };
 
+const safeFileName = (value = 'file') => {
+  const normalized = String(value).normalize('NFKC').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 120);
+  return normalized || 'file';
+};
+
+const storagePath = (key) => {
+  const path = join(storageRoot, key);
+  if (!path.startsWith(storageRoot)) throw Object.assign(new Error('Invalid storage key'), { status: 400 });
+  return path;
+};
+
+const storageConfig = () => ({
+  driver: 'local',
+  maxBytes: maxUploadBytes,
+  persistentPath: storageRoot,
+  note: 'Attach a Render persistent disk or replace this provider with object storage for durable production media.'
+});
+
 const server = http.createServer(async (req, res) => {
   cors(res);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
@@ -116,7 +157,8 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/health') {
       requireDb();
       await pool.query('SELECT 1');
-      return send(res, 200, { ok: true, service: 'song-note-auth', database: true });
+      const storage = storageConfig();
+      return send(res, 200, { ok: true, service: 'song-note-auth', database: true, storage });
     }
 
     if (url.pathname === '/api/auth/register' && req.method === 'POST') {
@@ -182,13 +224,67 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { user: cleanUser(result.rows[0]) });
     }
 
+    if (url.pathname === '/api/storage/upload' && req.method === 'POST') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const sizeHeader = Number(req.headers['content-length'] || 0);
+      if (sizeHeader > maxUploadBytes) return send(res, 413, { error: 'File is too large. Maximum size is 50 MB.' });
+      const mimeType = String(req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+      const originalName = safeFileName(url.searchParams.get('filename') || req.headers['x-file-name'] || 'upload');
+      const kind = String(url.searchParams.get('kind') || (mimeType.startsWith('audio/') ? 'original' : 'artwork'));
+      const id = crypto.randomUUID();
+      const key = `users/${user.id}/${id}-${originalName}`;
+      const filePath = storagePath(key);
+      const data = await readBinary(req, maxUploadBytes);
+      await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+      await writeStorageFile(filePath, data, { mode: 0o600 });
+      await pool.query(
+        'INSERT INTO storage_objects(id,user_id,object_key,original_name,mime_type,byte_size,storage_driver) VALUES($1,$2,$3,$4,$5,$6,$7)',
+        [id, user.id, key, originalName, mimeType, data.byteLength, 'local'],
+      );
+      return send(res, 201, { object: { id, filename: originalName, mimeType, size: data.byteLength, kind, key, url: `/api/storage/object/${id}` } });
+    }
+
+    if (url.pathname === '/api/storage' && req.method === 'GET') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const result = await pool.query(
+        'SELECT id,original_name,mime_type,byte_size,storage_driver,created_at FROM storage_objects WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',
+        [user.id],
+      );
+      return send(res, 200, { objects: result.rows.map(row => ({ id: row.id, filename: row.original_name, mimeType: row.mime_type, size: Number(row.byte_size), driver: row.storage_driver, createdAt: row.created_at, url: `/api/storage/object/${row.id}` })) });
+    }
+
+    const objectMatch = url.pathname.match(/^\/api\/storage\/object\/([0-9a-fA-F-]{36})$/);
+    if (objectMatch && req.method === 'GET') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const result = await pool.query('SELECT * FROM storage_objects WHERE id=$1 AND user_id=$2', [objectMatch[1], user.id]);
+      const row = result.rows[0];
+      if (!row) return send(res, 404, { error: 'File not found.' });
+      const data = await readStorageFile(storagePath(row.object_key));
+      res.writeHead(200, { 'Content-Type': row.mime_type, 'Content-Length': data.byteLength, 'Content-Disposition': `inline; filename="${row.original_name.replace(/"/g, '')}"`, 'Cache-Control': 'private, max-age=3600' });
+      return res.end(data);
+    }
+
+    if (objectMatch && req.method === 'DELETE') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const result = await pool.query('SELECT object_key FROM storage_objects WHERE id=$1 AND user_id=$2', [objectMatch[1], user.id]);
+      const row = result.rows[0];
+      if (!row) return send(res, 404, { error: 'File not found.' });
+      await unlink(storagePath(row.object_key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      await pool.query('DELETE FROM storage_objects WHERE id=$1 AND user_id=$2', [objectMatch[1], user.id]);
+      return send(res, 200, { ok: true });
+    }
+
     return send(res, 404, { error: 'Not found' });
   } catch (error) {
     console.error(error);
-    return send(res, error.status || 500, { error: error.status === 503 ? 'Authentication database is not configured.' : 'Server error.' });
+    return send(res, error.status || 500, { error: error.status || 500 === 413 ? error.message : error.message || 'Server error.' });
   }
 });
 
 initDatabase()
-  .then(() => server.listen(port, host, () => console.log(`Song Note auth listening on ${host}:${port} (Postgres)`)))
+  .then(() => server.listen(port, host, () => console.log(`Song Note auth listening on ${host}:${port} (Postgres + storage)`)))
   .catch((error) => { console.error('Database initialization failed', error); process.exit(1); });
