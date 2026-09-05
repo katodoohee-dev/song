@@ -18,7 +18,7 @@ const requiredTables = [
   'users', 'profiles', 'sessions', 'artists', 'albums', 'songs', 'tracks',
   'playlists', 'playlist_tracks', 'lyrics', 'lyric_lines', 'audio_files',
   'waveforms', 'likes', 'history', 'follows', 'karaoke_sessions',
-  'karaoke_scores', 'singing_results',
+  'karaoke_scores', 'singing_results', 'storage_objects',
 ];
 
 try {
