@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Home, Search, Library, Mic2, Play, Pause, Heart, ChevronRight, Sparkles, MoreHorizontal, X, Plus, Volume2, Shuffle, SkipBack, SkipForward, Repeat2, Upload, Link2, Music2, CheckCircle2 } from "lucide-react";
 import { AuthPanel } from "./auth-panel";
 import { uploadFile, type StorageObject } from "./storage";
+import { youtubeApi, type YouTubeMetadata } from "./songs";
 import "./styles.css";
 
 type Song={title:string;artist:string;note:string;image:string};
@@ -38,13 +39,28 @@ function App(){
 
 function AddMusicModal({onClose}:{onClose:()=>void}){
  const [busy,setBusy]=useState(false); const [message,setMessage]=useState(''); const [uploaded,setUploaded]=useState<StorageObject|null>(null);
+ const [link,setLink]=useState(''); const [metadata,setMetadata]=useState<YouTubeMetadata|null>(null); const [saving,setSaving]=useState(false);
  const handleFile=async(e:React.ChangeEvent<HTMLInputElement>)=>{
   const file=e.target.files?.[0]; if(!file)return; setBusy(true); setMessage(''); setUploaded(null);
   try { setUploaded(await uploadFile(file)); setMessage('Upload complete.'); }
   catch(error){ setMessage(error instanceof Error?error.message:'Upload failed.'); }
   finally { setBusy(false); e.target.value=''; }
  };
- return <div className="modalShade" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}><div className="record"><Music2 size={34}/><span>SONG NOTE</span></div><div className="modalBody"><h2>Add Music</h2><p>Bring a song into your library.</p><label className="primary wide" style={{cursor:busy?'wait':'pointer',opacity:busy?.6:1}}><Upload size={17}/>{busy?'Uploading…':'Upload music'}<input type="file" accept="audio/*" hidden disabled={busy} onChange={handleFile}/></label>{uploaded&&<div style={{display:'flex',alignItems:'center',gap:8,margin:'10px 0',color:'#d8ff66',fontSize:13}}><CheckCircle2 size={17}/><span>{uploaded.filename}</span></div>}{message&&<div style={{margin:'10px 0',fontSize:13,color:message==='Upload complete.'?'#d8ff66':'#ff8e8e'}}>{message}</div>}<button className="secondary wide"><Link2 size={17}/> Paste a link</button><button className="ghost wide" onClick={onClose}>Close</button></div></div></div>
+ const loadLink=async()=>{
+  const value=link.trim(); if(!value){setMessage('Paste a YouTube link first.');return;}
+  setSaving(true); setMessage(''); setMetadata(null);
+  try { const result=await youtubeApi.metadata(value); setMetadata(result.metadata); }
+  catch(error){ setMessage(error instanceof Error?error.message:'Could not read YouTube metadata.'); }
+  finally { setSaving(false); }
+ };
+ const saveLink=async()=>{
+  if(!metadata){await loadLink();return;}
+  setSaving(true); setMessage('');
+  try { const result=await youtubeApi.createSong(metadata.url); setMessage(result.song.duplicate?'Song already exists in your library.':'Song added to your library.'); }
+  catch(error){ setMessage(error instanceof Error?error.message:'Could not save song.'); }
+  finally { setSaving(false); }
+ };
+ return <div className="modalShade" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}><div className="record"><Music2 size={34}/><span>SONG NOTE</span></div><div className="modalBody"><h2>Add Music</h2><p>Bring a song into your library.</p><label className="primary wide" style={{cursor:busy?'wait':'pointer',opacity:busy?.6:1}}><Upload size={17}/>{busy?'Uploading…':'Upload music'}<input type="file" accept="audio/*" hidden disabled={busy} onChange={handleFile}/></label>{uploaded&&<div style={{display:'flex',alignItems:'center',gap:8,margin:'10px 0',color:'#d8ff66',fontSize:13}}><CheckCircle2 size={17}/><span>{uploaded.filename}</span></div>}<div style={{display:'grid',gap:8,marginTop:10}}><input value={link} onChange={e=>{setLink(e.target.value);setMetadata(null)}} placeholder="Paste YouTube link" style={{width:'100%',padding:'12px 14px',borderRadius:10,border:'1px solid rgba(255,255,255,.14)',background:'rgba(255,255,255,.05)',color:'inherit'}}/><button className="secondary wide" onClick={saveLink} disabled={saving}>{saving?(metadata?'Adding…':'Reading YouTube…'):<><Link2 size={17}/>{metadata?'Add YouTube song':'Get song info'}</>}</button></div>{metadata&&<div style={{display:'flex',gap:10,alignItems:'center',margin:'12px 0'}}><img src={metadata.artworkUrl} onError={e=>{e.currentTarget.src=metadata.artworkFallbackUrl}} style={{width:64,height:64,objectFit:'cover',borderRadius:8}}/><div style={{minWidth:0}}><b style={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{metadata.title}</b><span style={{fontSize:12,opacity:.7}}>{metadata.authorName||'YouTube'}</span></div></div>}{message&&<div style={{margin:'10px 0',fontSize:13,color:/complete|added|exists/i.test(message)?'#d8ff66':'#ff8e8e'}}>{message}</div>}<button className="ghost wide" onClick={onClose}>Close</button></div></div></div>
 }
 function HomeView({onPlay}:{onPlay:(s:Song)=>void}){return <section><p className="eyebrow">Good evening</p><h1>What do you want to hear?</h1><div className="hero"><img src={songs[0].image}/><div className="shade"/><div className="heroText"><p className="eyebrow"><Sparkles size={13}/> Continue listening</p><h2>Moonlit Echoes</h2><p>Luna Vale · Aurora Sessions</p><div><button className="primary" onClick={()=>onPlay(songs[0])}><Play size={16} fill="currentColor"/> Play</button><button className="secondary circle"><Heart size={17}/></button></div></div></div><Section title="Recently played"><div className="grid">{songs.slice(0,4).map(s=><Card key={s.title} song={s} onPlay={onPlay}/>)}</div></Section><Section title="Trending now"><div className="rows">{songs.slice(0,4).map((s,i)=><Row key={s.title} song={s} n={i+1} onPlay={onPlay}/>)}</div></Section></section>}
 function SearchView({query,setQuery,songs,onPlay}:{query:string;setQuery:(v:string)=>void;songs:Song[];onPlay:(s:Song)=>void}){return <section><h1>Search</h1><div className="search"><Search size={19}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Songs, artists, albums, playlists"/>{query&&<button onClick={()=>setQuery('')}><X size={17}/></button>}</div>{!query?<><Section title="Explore by mood"><div className="moods"><div>Calm</div><div>After dark</div><div>Sing along</div></div></Section></>:<div className="rows top">{songs.map((s,i)=><Row key={s.title} song={s} n={i+1} onPlay={onPlay}/>)}</div>}</section>}
