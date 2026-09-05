@@ -36,7 +36,7 @@ const passwordHash = (password, salt = crypto.randomBytes(16).toString('hex')) =
 const passwordMatches = async (password, stored) => { const [salt, hex] = String(stored).split(':'); if (!salt || !hex) return false; const candidate = await passwordHash(password, salt); const a = Buffer.from(candidate.split(':')[1], 'hex'); const b = Buffer.from(hex, 'hex'); return a.length === b.length && crypto.timingSafeEqual(a, b); };
 const cleanUser = row => ({ id: row.id, email: row.email, displayName: row.displayName ?? row.display_name, avatarUrl: row.avatarUrl ?? row.avatar_url ?? null, createdAt: row.createdAt ?? row.created_at });
 const validEmail = email => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-const cookie = (id, expires) => `${cookieName}=${encodeURIComponent(id)}; Path=/; HttpOnly; SameSite=Lax; Secure=${isProd}; Expires=${expires.toUTCString()}`.replace(`Secure=false; `, '');
+const sessionCookie = (id, expires) => `${cookieName}=${encodeURIComponent(id)}; Path=/; HttpOnly; SameSite=Lax; Expires=${expires.toUTCString()}${isProd ? '; Secure' : ''}`;
 const clearCookie = `${cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isProd ? '; Secure' : ''}`;
 
 async function loadLocalData() {
@@ -114,7 +114,7 @@ async function authRoute(req, res, pathname) {
     }
     const session = await createSession(user.id);
     if (!pool) await persistLocalData();
-    return sendJson(res, 201, { user }, { 'Set-Cookie': cookie(session.id, session.expires) });
+    return sendJson(res, 201, { user }, { 'Set-Cookie': sessionCookie(session.id, session.expires) });
   }
   if (pathname === '/api/auth/login' && req.method === 'POST') {
     const body = await readBody(req);
@@ -131,7 +131,7 @@ async function authRoute(req, res, pathname) {
       user = cleanUser(stored);
     }
     const session = await createSession(user.id);
-    return sendJson(res, 200, { user }, { 'Set-Cookie': cookie(session.id, session.expires) });
+    return sendJson(res, 200, { user }, { 'Set-Cookie': sessionCookie(session.id, session.expires) });
   }
   if (pathname === '/api/auth/profile' && req.method === 'PUT') {
     const user = await currentUser(req);
