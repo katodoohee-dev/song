@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Home, Search, Library, Mic2, Play, Pause, Heart, ChevronRight, Sparkles, MoreHorizontal, X, Plus, Volume2, Shuffle, SkipBack, SkipForward, Repeat2, Upload, Link2, Music2 } from "lucide-react";
+import { AuthPanel } from "./auth-panel";
 import "./styles.css";
 
 type Song={title:string;artist:string;note:string;image:string};
@@ -19,8 +20,8 @@ function App(){
  const filtered=useMemo(()=>songs.filter(s=>(s.title+' '+s.artist).toLowerCase().includes(query.toLowerCase())),[query]);
  const play=(s:Song)=>{setSong(s);setPlaying(true)};
  return <div className="app">
-  {view!=='karaoke'&&<aside className="sidebar"><div className="brand"><span className="brandMark"><Music2 size={17}/></span><b>Song Note</b></div><nav>{nav.map(([id,label,Icon])=><button key={id} className={view===id?'nav active':'nav'} onClick={()=>setView(id)}><Icon size={18}/>{label}</button>)}</nav><button className="profile"><span className="avatar">SN</span><span>Guest listener</span><MoreHorizontal size={18}/></button></aside>}
-  {view!=='karaoke'&&<header className="mobileHeader"><div className="brand"><span className="brandMark"><Music2 size={17}/></span><b>Song Note</b></div><button className="iconBtn" onClick={()=>setView('search')}><Search/></button></header>}
+  {view!=='karaoke'&&<aside className="sidebar"><div className="brand"><span className="brandMark"><Music2 size={17}/></span><b>Song Note</b></div><nav>{nav.map(([id,label,Icon])=><button key={id} className={view===id?'nav active':'nav'} onClick={()=>setView(id)}><Icon size={18}/>{label}</button>)}</nav><AuthPanel/></aside>}
+  {view!=='karaoke'&&<header className="mobileHeader"><div className="brand"><span className="brandMark"><Music2 size={17}/></span><b>Song Note</b></div><AuthPanel/></header>}
   <main className={view==='karaoke'?'main karaoke':'main'}>
    {view==='home'&&<HomeView onPlay={play}/>} 
    {view==='search'&&<SearchView query={query} setQuery={setQuery} songs={filtered} onPlay={play}/>} 
