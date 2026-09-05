@@ -4,6 +4,7 @@ import { readFile, writeFile, rename, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { getYouTubeMetadata } from './youtube.mjs';
 
 const { Pool } = pg;
 const port = Number(process.env.PORT || 10000);
@@ -23,12 +24,13 @@ let localStorageIndex = [];
 let localWrite = Promise.resolve();
 
 const send = (res, status, payload, headers = {}) => {
+  if (res.headersSent) return;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(payload));
 };
 
 const allowedOrigin = process.env.FRONTEND_ORIGIN || 'https://song-note-frontend.onrender.com';
-const cors = (res) => {
+const cors = res => {
   res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -91,7 +93,7 @@ const cleanupLocalSessions = () => {
 
 const readBody = req => new Promise((resolve, reject) => {
   let raw = '';
-  req.on('data', chunk => { raw += chunk; if (raw.length > 100_000) req.destroy(Object.assign(new Error('Request body too large'), { status: 413 })); });
+  req.on('data', chunk => { raw += chunk; if (raw.length > 100_000) { reject(Object.assign(new Error('Request body too large'), { status: 413 })); req.destroy(); } });
   req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(Object.assign(new Error('Invalid JSON'), { status: 400 })); } });
   req.on('error', reject);
 });
@@ -101,11 +103,7 @@ const readBinary = (req, limit) => new Promise((resolve, reject) => {
   let total = 0;
   req.on('data', chunk => {
     total += chunk.length;
-    if (total > limit) {
-      reject(Object.assign(new Error('File is too large. Maximum size is 50 MB.'), { status: 413 }));
-      req.destroy();
-      return;
-    }
+    if (total > limit) { reject(Object.assign(new Error('File is too large. Maximum size is 50 MB.'), { status: 413 })); req.destroy(); return; }
     chunks.push(chunk);
   });
   req.on('end', () => resolve(Buffer.concat(chunks)));
@@ -116,15 +114,14 @@ const currentUser = async req => {
   const sid = parseCookies(req.headers.cookie)[cookieName];
   if (!sid) return null;
   if (pool) {
-    const result = await pool.query(`SELECT u.id,u.email,u.display_name,u.avatar_url,u.role,u.created_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires_at>NOW()`, [sid]);
+    const result = await pool.query('SELECT u.id,u.email,u.display_name,u.avatar_url,u.role,u.created_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires_at>NOW()', [sid]);
     if (!result.rows[0]) return null;
     await pool.query('UPDATE sessions SET last_seen_at=NOW() WHERE id=$1', [sid]);
     return cleanUser(result.rows[0]);
   }
   if (cleanupLocalSessions()) await persistLocalState();
   const session = localData.sessions.find(item => item.id === sid);
-  if (!session) return null;
-  const user = localData.users.find(item => item.id === session.userId);
+  const user = session && localData.users.find(item => item.id === session.userId);
   return user ? cleanUser(user) : null;
 };
 
@@ -146,10 +143,10 @@ const registerUser = async (email, password, displayName) => {
     await pool.query('INSERT INTO profiles(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING', [id]);
     return { user: cleanUser(result.rows[0]), session: await createSession(id) };
   }
-  const duplicate = localData.users.some(user => user.email === email);
-  if (duplicate) return { error: 'An account with this email already exists.' };
+  if (localData.users.some(user => user.email === email)) return { error: 'An account with this email already exists.' };
   const user = { id: crypto.randomUUID(), email, passwordHash: await passwordHash(password), displayName, avatarUrl: null, role: 'USER', createdAt: new Date().toISOString() };
   localData.users.push(user);
+  await persistLocalState();
   return { user: cleanUser(user), session: await createSession(user.id) };
 };
 
@@ -180,23 +177,20 @@ const createStorageObject = async (user, req, url) => {
   const mimeType = String(req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim().toLowerCase();
   const originalName = safeName(url.searchParams.get('filename') || req.headers['x-file-name'] || 'upload');
   const kind = String(url.searchParams.get('kind') || (mimeType.startsWith('audio/') ? 'original' : 'artwork'));
-  if (!mimeType.startsWith('audio/') && !['image/jpeg','image/png','image/webp','text/plain','application/pdf'].includes(mimeType)) {
-    throw Object.assign(new Error('Unsupported file type.'), { status: 415 });
-  }
+  if (!mimeType.startsWith('audio/') && !['image/jpeg','image/png','image/webp','text/plain','application/pdf'].includes(mimeType)) throw Object.assign(new Error('Unsupported file type.'), { status: 415 });
   const id = crypto.randomUUID();
   const key = `users/${user.id}/${id}-${originalName}`;
   const data = await readBinary(req, maxUploadBytes);
-  const filePath = storagePath(key);
-  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
-  await writeStorageFile(filePath, data, { mode: 0o600 });
-  const row = { id, userId: user.id, objectKey: key, originalName, mimeType, byteSize: data.byteLength, kind, storageDriver: fallbackStorage ? 'local' : 'local', createdAt: new Date().toISOString() };
   if (pool) {
-    await pool.query('INSERT INTO storage_objects(id,user_id,object_key,original_name,mime_type,byte_size,storage_driver) VALUES($1,$2,$3,$4,$5,$6,$7)', [id, user.id, key, originalName, mimeType, data.byteLength, 'local']);
+    await pool.query('INSERT INTO storage_objects(id,user_id,object_key,original_name,mime_type,byte_size,storage_driver,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [id, user.id, key, originalName, mimeType, data.byteLength, 'postgres', data]);
   } else {
-    localStorageIndex.push(row);
+    const filePath = storagePath(key);
+    await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+    await writeFile(filePath, data, { mode: 0o600 });
+    localStorageIndex.push({ id, userId: user.id, objectKey: key, originalName, mimeType, byteSize: data.byteLength, kind, storageDriver: 'local', createdAt: new Date().toISOString() });
     await persistLocalState();
   }
-  return { id, filename: originalName, mimeType, size: data.byteLength, kind, key, url: `/api/storage/object/${id}` };
+  return { id, filename: originalName, mimeType, size: data.byteLength, kind, key, driver: pool ? 'postgres' : 'local', url: `/api/storage/object/${id}` };
 };
 
 const listStorage = async user => {
@@ -209,21 +203,53 @@ const listStorage = async user => {
 
 const getStorageRow = async (userId, id) => {
   if (pool) {
-    const result = await pool.query('SELECT id,object_key,original_name,mime_type,byte_size FROM storage_objects WHERE id=$1 AND user_id=$2', [id, userId]);
-    return result.rows[0] ? { id: result.rows[0].id, objectKey: result.rows[0].object_key, originalName: result.rows[0].original_name, mimeType: result.rows[0].mime_type, byteSize: Number(result.rows[0].byte_size) } : null;
+    const result = await pool.query('SELECT id,object_key,original_name,mime_type,byte_size,storage_driver,data FROM storage_objects WHERE id=$1 AND user_id=$2', [id, userId]);
+    return result.rows[0] ? { id: result.rows[0].id, objectKey: result.rows[0].object_key, originalName: result.rows[0].original_name, mimeType: result.rows[0].mime_type, byteSize: Number(result.rows[0].byte_size), storageDriver: result.rows[0].storage_driver, data: result.rows[0].data } : null;
   }
   return localStorageIndex.find(row => row.id === id && row.userId === userId) || null;
 };
 
-const writeStorageFile = async (filePath, data, options) => { const fsModule = await import('node:fs/promises'); await fsModule.writeFile(filePath, data, options); };
-
 const removeStorageRow = async (userId, id) => {
   const row = await getStorageRow(userId, id);
   if (!row) return false;
-  await unlink(storagePath(row.objectKey)).catch(error => { if (error.code !== 'ENOENT') throw error; });
   if (pool) await pool.query('DELETE FROM storage_objects WHERE id=$1 AND user_id=$2', [id, userId]);
-  else { localStorageIndex = localStorageIndex.filter(item => !(item.id === id && item.userId === userId)); await persistLocalState(); }
+  else { await unlink(storagePath(row.objectKey)).catch(error => { if (error.code !== 'ENOENT') throw error; }); localStorageIndex = localStorageIndex.filter(item => !(item.id === id && item.userId === userId)); await persistLocalState(); }
   return true;
+};
+
+const listSongs = async user => {
+  if (!pool) return [];
+  const result = await pool.query(`SELECT s.id,s.title,s.note,s.duration_ms,s.status,s.source_type,s.source_url,s.youtube_video_id,s.artwork_url,s.source_metadata,s.created_at,s.updated_at,t.source_url AS track_source_url FROM songs s LEFT JOIN tracks t ON t.song_id=s.id AND t.track_number=1 WHERE s.created_by=$1 ORDER BY s.created_at DESC LIMIT 200`, [user.id]);
+  return result.rows.map(row => ({ id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, sourceMetadata: row.source_metadata, trackSourceUrl: row.track_source_url, createdAt: row.created_at, updatedAt: row.updated_at }));
+};
+
+const createYouTubeSong = async (user, input) => {
+  if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
+  const metadata = await getYouTubeMetadata(input.url);
+  const existing = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
+  if (existing.rows[0]) {
+    const row = existing.rows[0];
+    return { id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, sourceMetadata: row.source_metadata, createdAt: row.created_at, updatedAt: row.updated_at, duplicate: true };
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const id = crypto.randomUUID();
+    const note = String(input.note || '').trim().slice(0, 5000) || null;
+    const sourceMetadata = { authorName: metadata.authorName, authorUrl: metadata.authorUrl, artworkFallbackUrl: metadata.artworkFallbackUrl, fetchedAt: new Date().toISOString() };
+    const songResult = await client.query(`INSERT INTO songs(id,title,note,status,created_by,source_type,source_url,youtube_video_id,artwork_url,source_metadata) VALUES($1,$2,$3,'ready',$4,'youtube',$5,$6,$7,$8) RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at`, [id, metadata.title, note, user.id, metadata.url, metadata.videoId, metadata.artworkUrl, sourceMetadata]);
+    await client.query('INSERT INTO tracks(id,song_id,track_number,title,source_url,mime_type) VALUES($1,$2,1,$3,$4,$5)', [crypto.randomUUID(), id, metadata.title, metadata.url, 'video/youtube']);
+    await client.query('COMMIT');
+    const row = songResult.rows[0];
+    return { id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, artworkFallbackUrl: metadata.artworkFallbackUrl, sourceMetadata: row.source_metadata, createdAt: row.created_at, updatedAt: row.updated_at, duplicate: false };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') {
+      const retry = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
+      if (retry.rows[0]) { const row = retry.rows[0]; return { id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, sourceMetadata: row.source_metadata, createdAt: row.created_at, updatedAt: row.updated_at, duplicate: true }; }
+    }
+    throw error;
+  } finally { client.release(); }
 };
 
 const server = http.createServer(async (req, res) => {
@@ -235,7 +261,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/health') {
       let database = false;
       if (pool) { await pool.query('SELECT 1'); database = true; }
-      return send(res, 200, { ok: true, service: 'song-note-auth', database, storage: { driver: 'local', maxBytes: maxUploadBytes, root: dataRoot, durable: Boolean(process.env.RENDER_DISK_MOUNT_PATH) } });
+      return send(res, 200, { ok: true, service: 'song-note-auth', database, storage: { driver: pool ? 'postgres' : 'local', maxBytes: maxUploadBytes, root: pool ? null : dataRoot, durable: Boolean(pool) || Boolean(process.env.RENDER_DISK_MOUNT_PATH) } });
     }
 
     if (url.pathname === '/api/auth/register' && req.method === 'POST') {
@@ -289,11 +315,32 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { user: cleanUser(localUser) });
     }
 
+    if (url.pathname === '/api/youtube/metadata' && req.method === 'POST') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const data = await readBody(req);
+      if (!String(data.url || '').trim()) return send(res, 400, { error: 'YouTube URL is required.' });
+      return send(res, 200, { metadata: await getYouTubeMetadata(data.url) });
+    }
+
+    if (url.pathname === '/api/songs/from-youtube' && req.method === 'POST') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const data = await readBody(req);
+      if (!String(data.url || '').trim()) return send(res, 400, { error: 'YouTube URL is required.' });
+      return send(res, 201, { song: await createYouTubeSong(user, data) });
+    }
+
+    if (url.pathname === '/api/songs' && req.method === 'GET') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      return send(res, 200, { songs: await listSongs(user) });
+    }
+
     if (url.pathname === '/api/storage/upload' && req.method === 'POST') {
       const user = await currentUser(req);
       if (!user) return send(res, 401, { error: 'Not authenticated.' });
-      const object = await createStorageObject(user, req, url);
-      return send(res, 201, { object });
+      return send(res, 201, { object: await createStorageObject(user, req, url) });
     }
 
     if (url.pathname === '/api/storage' && req.method === 'GET') {
@@ -308,7 +355,8 @@ const server = http.createServer(async (req, res) => {
       if (!user) return send(res, 401, { error: 'Not authenticated.' });
       const row = await getStorageRow(user.id, objectMatch[1]);
       if (!row) return send(res, 404, { error: 'File not found.' });
-      const data = await readFile(storagePath(row.objectKey));
+      const data = row.storageDriver === 'postgres' ? row.data : await readFile(storagePath(row.objectKey));
+      if (!data) return send(res, 410, { error: 'Stored file bytes are missing.' });
       res.writeHead(200, { 'Content-Type': row.mimeType, 'Content-Length': data.byteLength, 'Content-Disposition': `inline; filename="${row.originalName.replace(/"/g, '')}"`, 'Cache-Control': 'private, max-age=3600' });
       return res.end(data);
     }
@@ -334,7 +382,7 @@ const start = async () => {
     await pool.query(schema);
     const storageSchema = await readFile(new URL('./db/storage.sql', import.meta.url), 'utf8');
     await pool.query(storageSchema);
-    console.log('Song Note auth using PostgreSQL + local storage.');
+    console.log('Song Note auth using PostgreSQL + durable database storage.');
   } else {
     await initLocal();
     await mkdir(dataRoot, { recursive: true, mode: 0o700 });
