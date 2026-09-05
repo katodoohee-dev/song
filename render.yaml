@@ -8,6 +8,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: '22'
+      - key: NODE_ENV
+        value: production
       - key: VITE_AUTH_API_URL
         value: https://song-note-auth-api-v2.onrender.com
 
@@ -22,6 +24,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: '22'
+      - key: NODE_ENV
+        value: production
       - key: FRONTEND_ORIGIN
         value: https://song-note-frontend.onrender.com
       - key: STORAGE_DIR

@@ -16,8 +16,13 @@ const pool = new Pool({
 });
 
 try {
-  const sql = await readFile(new URL('./schema.sql', import.meta.url), 'utf8');
-  await pool.query(sql);
+  const schemaSql = await readFile(new URL('./schema.sql', import.meta.url), 'utf8');
+  await pool.query(schemaSql);
+  // storage.sql (storage_objects table) was previously not applied by this
+  // script — auth-server.mjs runs both on boot, but a manual
+  // `npm run db:migrate` silently skipped storage_objects until now.
+  const storageSql = await readFile(new URL('./storage.sql', import.meta.url), 'utf8');
+  await pool.query(storageSql);
   console.log('Song Note database schema is ready.');
 } finally {
   await pool.end();

@@ -1,3 +1,5 @@
+import { AUTH_API_URL } from './lib/env';
+
 export type StorageObject = {
   id: string;
   filename: string;
@@ -8,10 +10,8 @@ export type StorageObject = {
   url: string;
 };
 
-const API_URL = (import.meta.env.VITE_AUTH_API_URL || '').replace(/\/$/, '');
-
 async function json<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+  const response = await fetch(`${AUTH_API_URL}${path}`, {
     ...init,
     credentials: 'include',
     headers: init.body instanceof FormData ? (init.headers || {}) : { 'Content-Type': 'application/json', ...(init.headers || {}) },
@@ -24,14 +24,18 @@ async function json<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export async function uploadFile(file: File, kind = file.type.startsWith('audio/') ? 'original' : 'artwork') {
   if (file.size > 50 * 1024 * 1024) throw new Error('File is too large. Maximum size is 50 MB.');
-  const response = await fetch(`${API_URL}/api/storage/upload?filename=${encodeURIComponent(file.name)}&kind=${encodeURIComponent(kind)}`, {
+  const response = await fetch(`${AUTH_API_URL}/api/storage/upload?filename=${encodeURIComponent(file.name)}&kind=${encodeURIComponent(kind)}`, {
     method: 'POST',
     body: file,
     credentials: 'include',
     headers: { 'Content-Type': file.type || 'application/octet-stream' },
   });
   const payload: any = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(payload?.error || `Upload failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload?.error || `Upload failed (${response.status})`);
+    Object.assign(error, { status: response.status });
+    throw error;
+  }
   return payload.object as StorageObject;
 }
 
