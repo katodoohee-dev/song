@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS songs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS source_url TEXT;
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS youtube_video_id TEXT;
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS artwork_url TEXT;
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS source_metadata JSONB;
+CREATE UNIQUE INDEX IF NOT EXISTS songs_created_by_youtube_video_idx
+  ON songs(created_by, youtube_video_id)
+  WHERE youtube_video_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS tracks (
   id UUID PRIMARY KEY,
   song_id UUID NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
