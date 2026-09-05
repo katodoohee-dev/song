@@ -1,3 +1,5 @@
+import { AUTH_API_URL } from './lib/env';
+
 export type AuthUser = {
   id: string;
   email: string;
@@ -6,8 +8,6 @@ export type AuthUser = {
   role: string;
   createdAt: string;
 };
-
-const AUTH_API_URL = (import.meta.env.VITE_AUTH_API_URL || '').replace(/\/$/, '');
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${AUTH_API_URL}${path}`, {
