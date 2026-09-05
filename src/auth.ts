@@ -3,6 +3,7 @@ export type AuthUser = {
   email: string;
   displayName: string;
   avatarUrl: string | null;
+  role: string;
   createdAt: string;
 };
 
@@ -11,9 +12,9 @@ const AUTH_API_URL = (import.meta.env.VITE_AUTH_API_URL || '').replace(/\/$/, ''
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${AUTH_API_URL}${path}`, {
     ...init,
-    credentials: 'same-origin',
+    credentials: 'include',
     headers: {
-      'Content-Type': 'application/json',
+      ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       ...(init.headers || {}),
     },
   });
