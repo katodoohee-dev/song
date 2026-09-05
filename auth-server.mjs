@@ -18,7 +18,6 @@ const dataRoot = process.env.STORAGE_DIR || join(fileURLToPath(new URL('.', impo
 const authDataFile = join(dataRoot, '..', 'auth-data.json');
 const storageIndexFile = join(dataRoot, '..', 'storage-index.json');
 const maxUploadBytes = 50 * 1024 * 1024;
-const fallbackStorage = !pool;
 let localData = { users: [], sessions: [] };
 let localStorageIndex = [];
 let localWrite = Promise.resolve();
@@ -60,6 +59,37 @@ const validEmail = email => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const cleanUser = row => ({ id: row.id, email: row.email, displayName: row.display_name ?? row.displayName, avatarUrl: row.avatar_url ?? row.avatarUrl ?? null, role: row.role || 'USER', createdAt: row.created_at ?? row.createdAt });
 const sessionCookie = (id, expires) => `${cookieName}=${encodeURIComponent(id)}; Path=/; HttpOnly; SameSite=None; Secure; Expires=${expires.toUTCString()}`;
 const clearCookie = `${cookieName}=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0`;
+
+// ---------------------------------------------------------------------------
+// Very small in-memory rate limiter for the login/register endpoints.
+// Not a substitute for a real WAF/rate-limiting service, but it closes the
+// "unlimited brute force / credential stuffing" gap for a single-instance
+// deployment. Keyed by client IP; sliding window.
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+const RATE_LIMIT_MAX_ATTEMPTS = 20; // per IP per window, across login+register
+const rateLimitHits = new Map(); // ip -> array of timestamps
+
+const clientIp = req => {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  return req.socket?.remoteAddress || 'unknown';
+};
+
+const rateLimited = req => {
+  const ip = clientIp(req);
+  const now = Date.now();
+  const hits = (rateLimitHits.get(ip) || []).filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
+  hits.push(now);
+  rateLimitHits.set(ip, hits);
+  if (rateLimitHits.size > 5000) {
+    // Basic memory guard: drop entries that have aged out entirely.
+    for (const [key, value] of rateLimitHits) {
+      if (!value.some(ts => now - ts < RATE_LIMIT_WINDOW_MS)) rateLimitHits.delete(key);
+    }
+  }
+  return hits.length > RATE_LIMIT_MAX_ATTEMPTS;
+};
 
 const readJsonFile = async (file, fallback) => {
   try { return JSON.parse(await readFile(file, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
@@ -135,13 +165,19 @@ const createSession = async userId => {
 
 const registerUser = async (email, password, displayName) => {
   if (pool) {
-    const exists = await pool.query('SELECT 1 FROM users WHERE email=$1', [email]);
-    if (exists.rowCount) return { error: 'An account with this email already exists.' };
     const id = crypto.randomUUID();
     const hash = await passwordHash(password);
-    const result = await pool.query('INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,$3,$4) RETURNING id,email,display_name,avatar_url,role,created_at', [id, email, hash, displayName]);
-    await pool.query('INSERT INTO profiles(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING', [id]);
-    return { user: cleanUser(result.rows[0]), session: await createSession(id) };
+    try {
+      const result = await pool.query('INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,$3,$4) RETURNING id,email,display_name,avatar_url,role,created_at', [id, email, hash, displayName]);
+      await pool.query('INSERT INTO profiles(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING', [id]);
+      return { user: cleanUser(result.rows[0]), session: await createSession(id) };
+    } catch (error) {
+      // 23505 = unique_violation. Two concurrent registrations for the same
+      // email race the earlier SELECT-then-INSERT check; let the database's
+      // UNIQUE constraint be the single source of truth instead.
+      if (error.code === '23505') return { error: 'An account with this email already exists.' };
+      throw error;
+    }
   }
   if (localData.users.some(user => user.email === email)) return { error: 'An account with this email already exists.' };
   const user = { id: crypto.randomUUID(), email, passwordHash: await passwordHash(password), displayName, avatarUrl: null, role: 'USER', createdAt: new Date().toISOString() };
@@ -217,20 +253,37 @@ const removeStorageRow = async (userId, id) => {
   return true;
 };
 
+const mapSongRow = row => ({
+  id: row.id,
+  title: row.title,
+  note: row.note,
+  durationMs: row.duration_ms,
+  status: row.status,
+  sourceType: row.source_type,
+  sourceUrl: row.source_url,
+  youtubeVideoId: row.youtube_video_id,
+  artworkUrl: row.artwork_url,
+  sourceMetadata: row.source_metadata,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
 const listSongs = async user => {
-  if (!pool) return [];
+  // Song storage requires PostgreSQL (songs/tracks/audio_files tables).
+  // Throwing 503 here — instead of silently returning an empty list — lets
+  // the frontend (src/songs.ts) correctly fall back to its local-only view
+  // instead of showing a permanently empty library.
+  if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
   const result = await pool.query(`SELECT s.id,s.title,s.note,s.duration_ms,s.status,s.source_type,s.source_url,s.youtube_video_id,s.artwork_url,s.source_metadata,s.created_at,s.updated_at,t.source_url AS track_source_url FROM songs s LEFT JOIN tracks t ON t.song_id=s.id AND t.track_number=1 WHERE s.created_by=$1 ORDER BY s.created_at DESC LIMIT 200`, [user.id]);
-  return result.rows.map(row => ({ id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, sourceMetadata: row.source_metadata, trackSourceUrl: row.track_source_url, createdAt: row.created_at, updatedAt: row.updated_at }));
+  return result.rows.map(row => ({ ...mapSongRow(row), trackSourceUrl: row.track_source_url }));
 };
 
 const createYouTubeSong = async (user, input) => {
   if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
   const metadata = await getYouTubeMetadata(input.url);
   const existing = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
-  if (existing.rows[0]) {
-    const row = existing.rows[0];
-    return { id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, sourceMetadata: row.source_metadata, createdAt: row.created_at, updatedAt: row.updated_at, duplicate: true };
-  }
+  if (existing.rows[0]) return { ...mapSongRow(existing.rows[0]), duplicate: true };
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -240,16 +293,59 @@ const createYouTubeSong = async (user, input) => {
     const songResult = await client.query(`INSERT INTO songs(id,title,note,status,created_by,source_type,source_url,youtube_video_id,artwork_url,source_metadata) VALUES($1,$2,$3,'ready',$4,'youtube',$5,$6,$7,$8) RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at`, [id, metadata.title, note, user.id, metadata.url, metadata.videoId, metadata.artworkUrl, sourceMetadata]);
     await client.query('INSERT INTO tracks(id,song_id,track_number,title,source_url,mime_type) VALUES($1,$2,1,$3,$4,$5)', [crypto.randomUUID(), id, metadata.title, metadata.url, 'video/youtube']);
     await client.query('COMMIT');
-    const row = songResult.rows[0];
-    return { id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, artworkFallbackUrl: metadata.artworkFallbackUrl, sourceMetadata: row.source_metadata, createdAt: row.created_at, updatedAt: row.updated_at, duplicate: false };
+    return { ...mapSongRow(songResult.rows[0]), artworkFallbackUrl: metadata.artworkFallbackUrl, duplicate: false };
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') {
       const retry = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
-      if (retry.rows[0]) { const row = retry.rows[0]; return { id: row.id, title: row.title, note: row.note, durationMs: row.duration_ms, status: row.status, sourceType: row.source_type, sourceUrl: row.source_url, youtubeVideoId: row.youtube_video_id, artworkUrl: row.artwork_url, sourceMetadata: row.source_metadata, createdAt: row.created_at, updatedAt: row.updated_at, duplicate: true }; }
+      if (retry.rows[0]) return { ...mapSongRow(retry.rows[0]), duplicate: true };
     }
     throw error;
   } finally { client.release(); }
+};
+
+// Turn a previously-uploaded audio file (storage_objects) into a real
+// library entry: a songs row, its tracks row, and an audio_files row that
+// points at the same storage object. This is what makes "Upload music"
+// actually show up in the Library instead of only existing as a bare file.
+const createUploadSong = async (user, input) => {
+  if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
+  const objectId = String(input.objectId || '').trim();
+  if (!objectId) throw Object.assign(new Error('objectId is required.'), { status: 400 });
+
+  const row = await getStorageRow(user.id, objectId);
+  if (!row) throw Object.assign(new Error('Uploaded file not found.'), { status: 404 });
+  if (!String(row.mimeType).startsWith('audio/')) throw Object.assign(new Error('Only audio files can be added as songs.'), { status: 415 });
+
+  const title = String(input.title || row.originalName || 'Untitled').trim().slice(0, 200) || 'Untitled';
+  const note = String(input.note || '').trim().slice(0, 5000) || null;
+  const sourceUrl = `/api/storage/object/${row.id}`;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const id = crypto.randomUUID();
+    const songResult = await client.query(
+      `INSERT INTO songs(id,title,note,status,created_by,source_type,source_url) VALUES($1,$2,$3,'ready',$4,'upload',$5)
+       RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at`,
+      [id, title, note, user.id, sourceUrl],
+    );
+    await client.query(
+      'INSERT INTO tracks(id,song_id,track_number,title,source_url,mime_type) VALUES($1,$2,1,$3,$4,$5)',
+      [crypto.randomUUID(), id, title, sourceUrl, row.mimeType],
+    );
+    await client.query(
+      "INSERT INTO audio_files(id,song_id,kind,storage_key,mime_type,byte_size,status) VALUES($1,$2,'original',$3,$4,$5,'ready')",
+      [crypto.randomUUID(), id, row.objectKey, row.mimeType, row.byteSize],
+    );
+    await client.query('COMMIT');
+    return { ...mapSongRow(songResult.rows[0]), duplicate: false };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 const server = http.createServer(async (req, res) => {
@@ -265,6 +361,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/auth/register' && req.method === 'POST') {
+      if (rateLimited(req)) return send(res, 429, { error: 'Too many attempts. Please try again in a few minutes.' });
       const data = await readBody(req);
       const email = String(data.email || '').trim().toLowerCase();
       const password = String(data.password || '');
@@ -278,6 +375,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+      if (rateLimited(req)) return send(res, 429, { error: 'Too many attempts. Please try again in a few minutes.' });
       const data = await readBody(req);
       const email = String(data.email || '').trim().toLowerCase();
       const password = String(data.password || '');
@@ -331,6 +429,13 @@ const server = http.createServer(async (req, res) => {
       return send(res, 201, { song: await createYouTubeSong(user, data) });
     }
 
+    if (url.pathname === '/api/songs/from-upload' && req.method === 'POST') {
+      const user = await currentUser(req);
+      if (!user) return send(res, 401, { error: 'Not authenticated.' });
+      const data = await readBody(req);
+      return send(res, 201, { song: await createUploadSong(user, data) });
+    }
+
     if (url.pathname === '/api/songs' && req.method === 'GET') {
       const user = await currentUser(req);
       if (!user) return send(res, 401, { error: 'Not authenticated.' });
@@ -357,7 +462,7 @@ const server = http.createServer(async (req, res) => {
       if (!row) return send(res, 404, { error: 'File not found.' });
       const data = row.storageDriver === 'postgres' ? row.data : await readFile(storagePath(row.objectKey));
       if (!data) return send(res, 410, { error: 'Stored file bytes are missing.' });
-      res.writeHead(200, { 'Content-Type': row.mimeType, 'Content-Length': data.byteLength, 'Content-Disposition': `inline; filename="${row.originalName.replace(/"/g, '')}"`, 'Cache-Control': 'private, max-age=3600' });
+      res.writeHead(200, { 'Content-Type': row.mimeType, 'Content-Length': data.byteLength, 'Content-Disposition': `inline; filename="${row.originalName.replace(/"/g, '')}"`, 'Cache-Control': 'private, max-age=3600', 'Accept-Ranges': 'bytes' });
       return res.end(data);
     }
 
