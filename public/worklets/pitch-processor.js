@@ -1,0 +1,6 @@
+class PitchProcessor extends AudioWorkletProcessor {
+  constructor(){super();this.buf=new Float32Array(2048);this.filled=0;}
+  process(inputs){const input=inputs[0]&&inputs[0][0];if(!input)return true;for(let i=0;i<input.length;i++){this.buf[this.filled++]=input[i];if(this.filled===2048){this.emit();this.filled=0;}}return true;}
+  emit(){const x=this.buf;let sum=0,peak=0;for(let i=0;i<x.length;i++){sum+=x[i]*x[i];const a=Math.abs(x[i]);if(a>peak)peak=a;}const rms=Math.sqrt(sum/x.length);if(rms<0.01){this.port.postMessage({note:null,frequency:null,confidence:0,rms,peak,voiced:false});return;}let best=0,bestErr=Infinity;for(let lag=32;lag<512;lag++){let diff=0,n=0;for(let i=0;i+lag<x.length;i+=2){const d=x[i]-x[i+lag];diff+=d*d;n++;}const err=diff/Math.max(1,n);if(err<bestErr){bestErr=err;best=lag;}}const freq=sampleRate/best;const confidence=Math.max(0,Math.min(1,1-bestErr/(rms*rms+1e-9)));const voiced=freq>=70&&freq<=1000&&confidence>=0.55;const midi=69+12*Math.log2(freq/440);const noteNames=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];const note=voiced?noteNames[((Math.round(midi)%12)+12)%12]+String(Math.floor(midi/12)-1):null;this.port.postMessage({note,frequency:voiced?freq:null,confidence,rms,peak,voiced});}
+}
+registerProcessor('pitch-processor',PitchProcessor);

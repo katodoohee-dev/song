@@ -1,3 +1,3 @@
 # Song Note
 
-Frontend deployment prepared for Render.
+Production-ready music workspace.
