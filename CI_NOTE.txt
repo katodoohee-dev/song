@@ -1,0 +1,1 @@
+Final production integration verification is delegated to the repository CI workflow and Render deployment.
