@@ -1,3 +1,11 @@
 # Song Note
 
-Production-ready music workspace.\n\n## Development\n\n```bash\nnpm install\nnpm run typecheck\nnpm run build\n```\n
+Production-ready music workspace.
+
+## Development
+
+```bash
+npm install
+npm run typecheck
+npm run build
+```
