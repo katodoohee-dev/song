@@ -8,3 +8,13 @@ services:
     envVars:
       - key: NODE_VERSION
         value: '22'
+      - key: DATABASE_URL
+        fromDatabase:
+          name: song-note-database
+          property: connectionString
+
+databases:
+  - name: song-note-database
+    plan: free
+    region: singapore
+    version: 18
