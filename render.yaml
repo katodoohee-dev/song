@@ -16,6 +16,7 @@ services:
     runtime: node
     plan: free
     region: singapore
+    healthCheckPath: /health
     buildCommand: npm install
     startCommand: node auth-server.mjs
     envVars:
