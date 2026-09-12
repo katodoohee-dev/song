@@ -245,6 +245,19 @@ const getStorageRow = async (userId, id) => {
   return localStorageIndex.find(row => row.id === id && row.userId === userId) || null;
 };
 
+// Unlike getStorageRow, this does NOT check ownership — it's used only to
+// stream audio bytes for songs that have been shared library-wide (see
+// listSongs / the shared-library feature). Any authenticated user may read
+// a file this way, but only the original uploader can delete it
+// (removeStorageRow still goes through the owner-scoped getStorageRow).
+const getStorageRowForRead = async id => {
+  if (pool) {
+    const result = await pool.query('SELECT id,object_key,original_name,mime_type,byte_size,storage_driver,data FROM storage_objects WHERE id=$1', [id]);
+    return result.rows[0] ? { id: result.rows[0].id, objectKey: result.rows[0].object_key, originalName: result.rows[0].original_name, mimeType: result.rows[0].mime_type, byteSize: Number(result.rows[0].byte_size), storageDriver: result.rows[0].storage_driver, data: result.rows[0].data } : null;
+  }
+  return localStorageIndex.find(row => row.id === id) || null;
+};
+
 const removeStorageRow = async (userId, id) => {
   const row = await getStorageRow(userId, id);
   if (!row) return false;
@@ -266,15 +279,21 @@ const mapSongRow = row => ({
   sourceMetadata: row.source_metadata,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  addedBy: row.added_by_name ?? null,
+  addedByUserId: row.created_by ?? null,
 });
 
-const listSongs = async user => {
+// Library-wide shared list: every song added by any account is visible to
+// every other account (this was an explicit product decision — see PR
+// description for the tradeoffs, since it turns "my uploads" into
+// "public within this app" rather than private-per-user storage).
+const listSongs = async () => {
   // Song storage requires PostgreSQL (songs/tracks/audio_files tables).
   // Throwing 503 here — instead of silently returning an empty list — lets
   // the frontend (src/songs.ts) correctly fall back to its local-only view
   // instead of showing a permanently empty library.
   if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
-  const result = await pool.query(`SELECT s.id,s.title,s.note,s.duration_ms,s.status,s.source_type,s.source_url,s.youtube_video_id,s.artwork_url,s.source_metadata,s.created_at,s.updated_at,t.source_url AS track_source_url FROM songs s LEFT JOIN tracks t ON t.song_id=s.id AND t.track_number=1 WHERE s.created_by=$1 ORDER BY s.created_at DESC LIMIT 200`, [user.id]);
+  const result = await pool.query(`SELECT s.id,s.title,s.note,s.duration_ms,s.status,s.source_type,s.source_url,s.youtube_video_id,s.artwork_url,s.source_metadata,s.created_at,s.updated_at,s.created_by,u.display_name AS added_by_name,t.source_url AS track_source_url FROM songs s LEFT JOIN tracks t ON t.song_id=s.id AND t.track_number=1 LEFT JOIN users u ON u.id=s.created_by ORDER BY s.created_at DESC LIMIT 300`);
   return result.rows.map(row => ({ ...mapSongRow(row), trackSourceUrl: row.track_source_url }));
 };
 
@@ -439,7 +458,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/songs' && req.method === 'GET') {
       const user = await currentUser(req);
       if (!user) return send(res, 401, { error: 'Not authenticated.' });
-      return send(res, 200, { songs: await listSongs(user) });
+      return send(res, 200, { songs: await listSongs() });
     }
 
     if (url.pathname === '/api/storage/upload' && req.method === 'POST') {
@@ -458,7 +477,10 @@ const server = http.createServer(async (req, res) => {
     if (objectMatch && req.method === 'GET') {
       const user = await currentUser(req);
       if (!user) return send(res, 401, { error: 'Not authenticated.' });
-      const row = await getStorageRow(user.id, objectMatch[1]);
+      // Any authenticated user can stream any object here (not just its
+      // owner) because songs are shared library-wide — see listSongs. This
+      // still requires a valid session; it just isn't scoped by ownership.
+      const row = await getStorageRowForRead(objectMatch[1]);
       if (!row) return send(res, 404, { error: 'File not found.' });
       const data = row.storageDriver === 'postgres' ? row.data : await readFile(storagePath(row.objectKey));
       if (!data) return send(res, 410, { error: 'Stored file bytes are missing.' });

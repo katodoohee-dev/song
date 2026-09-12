@@ -31,7 +31,9 @@ const fromApiSong=(item:ApiSong):Song=>({
  // something useAudioEngine can act on directly.
  sourceUrl:item.sourceType==='upload' && item.sourceUrl ? `${AUTH_API_URL}${item.sourceUrl}` : item.sourceUrl,
  title:item.title,
- artist:item.sourceType==='upload'?'You':'YouTube',
+ // Songs are shared library-wide, so "artist" here doubles as an "added by"
+ // credit rather than assuming the viewer is the uploader.
+ artist:item.sourceType==='upload'?(item.addedBy?`Added by ${item.addedBy}`:'Uploaded track'):'YouTube',
  note:item.note||(item.sourceType==='upload'?'Uploaded track':'YouTube'),
  image:item.artworkUrl||item.artworkFallbackUrl||'https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85'
 });

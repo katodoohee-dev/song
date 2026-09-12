@@ -23,6 +23,9 @@ export type Song = {
   createdAt?: string;
   updatedAt?: string;
   duplicate?: boolean;
+  // Populated now that the library is shared across every account — the
+  // display name of whoever originally added this song.
+  addedBy?: string | null;
 };
 
 import { AUTH_API_URL } from './lib/env';
