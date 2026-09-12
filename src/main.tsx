@@ -65,12 +65,29 @@ function loadYouTubeIframeApi(): Promise<any> {
   });
 }
 
+// Karaoke-style vocal reduction via phase cancellation (the classic "L minus
+// R" trick): subtracting the right channel from the left cancels audio
+// that's panned dead-center in the stereo mix, which is often the lead
+// vocal. It's a real, shippable, zero-latency technique that runs entirely
+// client-side — but it is NOT AI source separation, and it has real limits:
+//  - Only works on uploaded audio files. YouTube playback goes through
+//    Google's iframe player, which does not expose raw audio samples, so
+//    this cannot be applied to YouTube-sourced songs.
+//  - Mono sources, or vocals that aren't mixed dead-center, won't be
+//    affected. Anything else mixed to center (bass, kick drum, etc.) will
+//    be reduced too.
+type VocalRemovalGraph = { ctx: AudioContext; source: MediaElementAudioSourceNode; splitter: ChannelSplitterNode; merger: ChannelMergerNode; invertR: GainNode; dry: GainNode };
+
 function useAudioEngine(song: Song, playing: boolean) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ytPlayerRef = useRef<any>(null);
   const ytReadyRef = useRef(false);
   const containerId = useRef(`yt-player-${Math.random().toString(36).slice(2)}`);
   const [unavailable, setUnavailable] = useState(false);
+  const graphRef = useRef<VocalRemovalGraph | null>(null);
+  const [vocalRemovalActive, setVocalRemovalActive] = useState(false);
+  // Only offered for uploaded tracks — see limitations above.
+  const vocalRemovalSupported = song.sourceType === 'upload';
 
   useEffect(() => {
     const audio = new Audio();
@@ -78,6 +95,62 @@ function useAudioEngine(song: Song, playing: boolean) {
     audioRef.current = audio;
     return () => { audio.pause(); audio.src = ''; };
   }, []);
+
+  const ensureGraph = (): VocalRemovalGraph | null => {
+    const audio = audioRef.current;
+    if (!audio) return null;
+    if (graphRef.current) return graphRef.current;
+    const Ctor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return null;
+    try {
+      const ctx = new Ctor();
+      const source = ctx.createMediaElementSource(audio);
+      const dry = ctx.createGain();
+      const splitter = ctx.createChannelSplitter(2);
+      const merger = ctx.createChannelMerger(2);
+      const invertR = ctx.createGain();
+      invertR.gain.value = -1;
+      source.connect(dry);
+      dry.connect(ctx.destination);
+      const graph = { ctx, source, splitter, merger, invertR, dry };
+      graphRef.current = graph;
+      return graph;
+    } catch {
+      // Most likely cause: the browser already attached a MediaElementSource
+      // to this element, or the audio is cross-origin without CORS headers
+      // (which also blocks sample-level access). Either way, fall back to
+      // normal playback rather than breaking audio entirely.
+      return null;
+    }
+  };
+  const routeDry = (graph: VocalRemovalGraph) => {
+    try { graph.splitter.disconnect(); } catch { /* already disconnected */ }
+    try { graph.invertR.disconnect(); } catch { /* already disconnected */ }
+    try { graph.merger.disconnect(); } catch { /* already disconnected */ }
+    graph.dry.connect(graph.ctx.destination);
+  };
+  const routeVocalRemoval = (graph: VocalRemovalGraph) => {
+    try { graph.dry.disconnect(); } catch { /* already disconnected */ }
+    graph.source.connect(graph.splitter);
+    graph.splitter.connect(graph.merger, 0, 0);
+    graph.splitter.connect(graph.merger, 0, 1);
+    graph.splitter.connect(graph.invertR, 1);
+    graph.invertR.connect(graph.merger, 0, 0);
+    graph.invertR.connect(graph.merger, 0, 1);
+    graph.merger.connect(graph.ctx.destination);
+  };
+  const toggleVocalRemoval = () => {
+    if (!vocalRemovalSupported) return;
+    const graph = ensureGraph();
+    if (!graph) { setUnavailable(true); return; }
+    const next = !vocalRemovalActive;
+    if (next) routeVocalRemoval(graph); else routeDry(graph);
+    void graph.ctx.resume();
+    setVocalRemovalActive(next);
+  };
+  // Turn vocal removal off whenever the song changes, so it doesn't
+  // silently carry over onto a track the user didn't ask for it on.
+  useEffect(() => { setVocalRemovalActive(false); }, [song.id]);
 
   // Swap sources whenever the selected song changes.
   useEffect(() => {
@@ -164,7 +237,7 @@ function useAudioEngine(song: Song, playing: boolean) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasRealAudio, song.sourceType, song.id]);
 
-  return { hasRealAudio, unavailable, progress };
+  return { hasRealAudio, unavailable, progress, vocalRemovalSupported, vocalRemovalActive, toggleVocalRemoval };
 }
 
 const formatTime = (seconds: number) => {
@@ -179,7 +252,7 @@ function App(){
  const [view,setView]=useState<'home'|'search'|'library'|'karaoke'>('home');
  const [librarySongs,setLibrarySongs]=useState<Song[]>(songs);
  const [song,setSong]=useState(songs[0]); const [playing,setPlaying]=useState(false); const [lyrics,setLyrics]=useState(false); const [query,setQuery]=useState(''); const [add,setAdd]=useState(false);
- const { hasRealAudio, unavailable, progress } = useAudioEngine(song, playing);
+ const { hasRealAudio, unavailable, progress, vocalRemovalSupported, vocalRemovalActive, toggleVocalRemoval } = useAudioEngine(song, playing);
  useEffect(()=>{
   let active=true;
   youtubeApi.list().then(({songs:remote})=>{
@@ -205,7 +278,7 @@ function App(){
    {view==='library'&&<LibraryView songs={librarySongs} onPlay={play} onAdd={()=>setAdd(true)}/>} 
    {view==='karaoke'&&<Karaoke song={song} onEnd={()=>setView('home')}/>} 
   </main>
-  {view!=='karaoke'&&<Player song={song} playing={playing} onToggle={()=>setPlaying(v=>!v)} onLyrics={()=>setLyrics(true)} onKaraoke={()=>setView('karaoke')} hasRealAudio={hasRealAudio} unavailable={unavailable} progress={progress}/>} 
+  {view!=='karaoke'&&<Player song={song} playing={playing} onToggle={()=>setPlaying(v=>!v)} onLyrics={()=>setLyrics(true)} onKaraoke={()=>setView('karaoke')} hasRealAudio={hasRealAudio} unavailable={unavailable} progress={progress} vocalRemovalSupported={vocalRemovalSupported} vocalRemovalActive={vocalRemovalActive} onToggleVocalRemoval={toggleVocalRemoval}/>} 
   {view!=='karaoke'&&<nav className="mobileNav">{nav.map(([id,label,Icon])=><button key={id} className={view===id?'mobileNavItem active':'mobileNavItem'} onClick={()=>setView(id)}><Icon size={18}/><span>{label}</span></button>)}</nav>}
   {lyrics&&<div className="overlay"><div className="overlayTop"><button className="iconBtn" onClick={()=>setLyrics(false)}><X/></button><div><b>{song.title}</b><span>{song.artist}</span></div><MoreHorizontal/></div><div className="lyrics"><p className="faint">I still remember the night we met</p><h2><span>ฉัน ยัง รอ </span><em>เธอ</em><span> อยู่ ตรง นี้</span></h2><p className="en">I’m still waiting right here</p><p className="faint">แม้เวลาจะผ่านไปนานเท่าไร</p></div><button className="primary" onClick={()=>{setLyrics(false);setView('karaoke')}}><Mic2 size={17}/> Karaoke</button></div>}
   {add&&<AddMusicModal onClose={()=>setAdd(false)} onAdded={addSongToLibrary}/>} 
@@ -266,9 +339,9 @@ function Karaoke({song,onEnd}:{song:Song;onEnd:()=>void}){return <div className=
 function Card({song,onPlay}:{song:Song;onPlay:(s:Song)=>void}){return <article className="card" onClick={()=>onPlay(song)}><div className="cover"><div className="vinyl"/><img src={song.image}/><button className="play"><Play size={16} fill="currentColor"/></button></div><b>{song.title}</b><span>{song.artist}</span></article>}
 function Row({song,n,onPlay}:{song:Song;n:number;onPlay:(s:Song)=>void}){return <div className="row" onClick={()=>onPlay(song)}><small>{String(n).padStart(2,'0')}</small><img src={song.image}/><div><b>{song.title}</b><span>{song.artist}</span></div><span className="note">{song.note}</span><small>3:{12+n}</small><MoreHorizontal size={17}/></div>}
 function Section({title,children}:{title:string;children:React.ReactNode}){return <section className="sub"><div className="sectionTitle"><h2>{title}</h2><button className="ghost">See all <ChevronRight size={16}/></button></div>{children}</section>}
-function Player({song,playing,onToggle,onLyrics,onKaraoke,hasRealAudio,unavailable,progress}:{song:Song;playing:boolean;onToggle:()=>void;onLyrics:()=>void;onKaraoke:()=>void;hasRealAudio:boolean;unavailable:boolean;progress:{currentTime:number;duration:number}}){
+function Player({song,playing,onToggle,onLyrics,onKaraoke,hasRealAudio,unavailable,progress,vocalRemovalSupported,vocalRemovalActive,onToggleVocalRemoval}:{song:Song;playing:boolean;onToggle:()=>void;onLyrics:()=>void;onKaraoke:()=>void;hasRealAudio:boolean;unavailable:boolean;progress:{currentTime:number;duration:number};vocalRemovalSupported:boolean;vocalRemovalActive:boolean;onToggleVocalRemoval:()=>void}){
  const pct = hasRealAudio && progress.duration > 0 ? Math.min(100, (progress.currentTime / progress.duration) * 100) : 0;
- return <div className="player"><div className="now"><img src={song.image}/><div><b>{song.title}</b><span>{unavailable?'Playback unavailable':!hasRealAudio?'Preview not available':song.artist}</span></div><Heart size={17}/></div><div className="controls"><div><button><SkipBack/></button><button className="primary circle" onClick={onToggle} disabled={!hasRealAudio} style={{opacity:hasRealAudio?1:.5,cursor:hasRealAudio?'pointer':'not-allowed'}} title={hasRealAudio?undefined:'This track has no playable audio source'}>{playing?<Pause fill="currentColor"/>:<Play fill="currentColor"/>}</button><button><SkipForward/></button></div><div className="progress"><span>{hasRealAudio?formatTime(progress.currentTime):'0:00'}</span><div><i style={{width:`${pct}%`}}/></div><span>{hasRealAudio?formatTime(progress.duration):'--:--'}</span></div></div><div className="right"><button className="ghost" onClick={onLyrics}><Sparkles/> Lyrics</button><button className="ghost" onClick={onKaraoke}><Mic2/></button><Volume2 size={16}/></div></div>
+ return <div className="player"><div className="now"><img src={song.image}/><div><b>{song.title}</b><span>{unavailable?'Playback unavailable':!hasRealAudio?'Preview not available':song.artist}</span></div><Heart size={17}/></div><div className="controls"><div><button><SkipBack/></button><button className="primary circle" onClick={onToggle} disabled={!hasRealAudio} style={{opacity:hasRealAudio?1:.5,cursor:hasRealAudio?'pointer':'not-allowed'}} title={hasRealAudio?undefined:'This track has no playable audio source'}>{playing?<Pause fill="currentColor"/>:<Play fill="currentColor"/>}</button><button><SkipForward/></button></div><div className="progress"><span>{hasRealAudio?formatTime(progress.currentTime):'0:00'}</span><div><i style={{width:`${pct}%`}}/></div><span>{hasRealAudio?formatTime(progress.duration):'--:--'}</span></div></div><div className="right">{vocalRemovalSupported&&<button className={vocalRemovalActive?'ghost active':'ghost'} onClick={onToggleVocalRemoval} disabled={!hasRealAudio} title="Reduce center-panned vocals (works best on uploaded tracks, not YouTube)"><Mic2 size={15}/> {vocalRemovalActive?'Vocals off':'No vocals'}</button>}<button className="ghost" onClick={onLyrics}><Sparkles/> Lyrics</button><button className="ghost" onClick={onKaraoke}><Mic2/></button><Volume2 size={16}/></div></div>
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);
