@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { getYouTubeMetadata } from './youtube.mjs';
+import { fetchLyrics } from './lib/lyrics.mjs';
 
 const { Pool } = pg;
 const port = Number(process.env.PORT || 10000);
@@ -266,7 +267,29 @@ const mapSongRow = row => ({
   sourceMetadata: row.source_metadata,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  syncedLyrics: row.synced_lyrics ?? null,
+  plainLyrics: row.plain_lyrics ?? null,
+  lyricsSource: row.lyrics_source ?? null,
+  lyricsInstrumental: Boolean(row.lyrics_instrumental),
 });
+
+// Best-effort: look up lyrics on lrclib.net and store them on the song row.
+// Never throws — a lyrics miss should never take down song creation, it
+// should just leave the song without synced lyrics.
+const attachLyrics = async (songId, title, artistHint) => {
+  try {
+    const found = await fetchLyrics(title, artistHint);
+    if (!found) return null;
+    const result = await pool.query(
+      'UPDATE songs SET synced_lyrics=$1,plain_lyrics=$2,lyrics_source=$3,lyrics_instrumental=$4 WHERE id=$5 RETURNING synced_lyrics,plain_lyrics,lyrics_source,lyrics_instrumental',
+      [found.syncedLyrics, found.plainLyrics, found.source, found.instrumental, songId],
+    );
+    return result.rows[0] || null;
+  } catch (error) {
+    console.error('Lyrics lookup failed for song', songId, error);
+    return null;
+  }
+};
 
 const listSongs = async user => {
   // Song storage requires PostgreSQL (songs/tracks/audio_files tables).
@@ -274,14 +297,14 @@ const listSongs = async user => {
   // the frontend (src/songs.ts) correctly fall back to its local-only view
   // instead of showing a permanently empty library.
   if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
-  const result = await pool.query(`SELECT s.id,s.title,s.note,s.duration_ms,s.status,s.source_type,s.source_url,s.youtube_video_id,s.artwork_url,s.source_metadata,s.created_at,s.updated_at,t.source_url AS track_source_url FROM songs s LEFT JOIN tracks t ON t.song_id=s.id AND t.track_number=1 WHERE s.created_by=$1 ORDER BY s.created_at DESC LIMIT 200`, [user.id]);
+  const result = await pool.query(`SELECT s.id,s.title,s.note,s.duration_ms,s.status,s.source_type,s.source_url,s.youtube_video_id,s.artwork_url,s.source_metadata,s.synced_lyrics,s.plain_lyrics,s.lyrics_source,s.lyrics_instrumental,s.created_at,s.updated_at,t.source_url AS track_source_url FROM songs s LEFT JOIN tracks t ON t.song_id=s.id AND t.track_number=1 WHERE s.created_by=$1 ORDER BY s.created_at DESC LIMIT 200`, [user.id]);
   return result.rows.map(row => ({ ...mapSongRow(row), trackSourceUrl: row.track_source_url }));
 };
 
 const createYouTubeSong = async (user, input) => {
   if (!pool) throw Object.assign(new Error('Song database is not available in local fallback mode.'), { status: 503 });
   const metadata = await getYouTubeMetadata(input.url);
-  const existing = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
+  const existing = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,synced_lyrics,plain_lyrics,lyrics_source,lyrics_instrumental,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
   if (existing.rows[0]) return { ...mapSongRow(existing.rows[0]), duplicate: true };
 
   const client = await pool.connect();
@@ -290,14 +313,19 @@ const createYouTubeSong = async (user, input) => {
     const id = crypto.randomUUID();
     const note = String(input.note || '').trim().slice(0, 5000) || null;
     const sourceMetadata = { authorName: metadata.authorName, authorUrl: metadata.authorUrl, artworkFallbackUrl: metadata.artworkFallbackUrl, fetchedAt: new Date().toISOString() };
-    const songResult = await client.query(`INSERT INTO songs(id,title,note,status,created_by,source_type,source_url,youtube_video_id,artwork_url,source_metadata) VALUES($1,$2,$3,'ready',$4,'youtube',$5,$6,$7,$8) RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at`, [id, metadata.title, note, user.id, metadata.url, metadata.videoId, metadata.artworkUrl, sourceMetadata]);
+    const songResult = await client.query(`INSERT INTO songs(id,title,note,status,created_by,source_type,source_url,youtube_video_id,artwork_url,source_metadata) VALUES($1,$2,$3,'ready',$4,'youtube',$5,$6,$7,$8) RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,synced_lyrics,plain_lyrics,lyrics_source,lyrics_instrumental,created_at,updated_at`, [id, metadata.title, note, user.id, metadata.url, metadata.videoId, metadata.artworkUrl, sourceMetadata]);
     await client.query('INSERT INTO tracks(id,song_id,track_number,title,source_url,mime_type) VALUES($1,$2,1,$3,$4,$5)', [crypto.randomUUID(), id, metadata.title, metadata.url, 'video/youtube']);
     await client.query('COMMIT');
-    return { ...mapSongRow(songResult.rows[0]), artworkFallbackUrl: metadata.artworkFallbackUrl, duplicate: false };
+    // Best-effort lyrics lookup, after the song is safely committed. Not
+    // awaited-and-blocking in the sense of failing the request — attachLyrics
+    // itself never throws — but we do wait for it so the first response
+    // already includes lyrics when a match is found quickly.
+    const lyricsRow = await attachLyrics(id, metadata.title, metadata.authorName);
+    return { ...mapSongRow({ ...songResult.rows[0], ...(lyricsRow || {}) }), artworkFallbackUrl: metadata.artworkFallbackUrl, duplicate: false };
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') {
-      const retry = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
+      const retry = await pool.query('SELECT id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,synced_lyrics,plain_lyrics,lyrics_source,lyrics_instrumental,created_at,updated_at FROM songs WHERE created_by=$1 AND youtube_video_id=$2', [user.id, metadata.videoId]);
       if (retry.rows[0]) return { ...mapSongRow(retry.rows[0]), duplicate: true };
     }
     throw error;
@@ -327,7 +355,7 @@ const createUploadSong = async (user, input) => {
     const id = crypto.randomUUID();
     const songResult = await client.query(
       `INSERT INTO songs(id,title,note,status,created_by,source_type,source_url) VALUES($1,$2,$3,'ready',$4,'upload',$5)
-       RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,created_at,updated_at`,
+       RETURNING id,title,note,duration_ms,status,source_type,source_url,youtube_video_id,artwork_url,source_metadata,synced_lyrics,plain_lyrics,lyrics_source,lyrics_instrumental,created_at,updated_at`,
       [id, title, note, user.id, sourceUrl],
     );
     await client.query(
@@ -339,7 +367,11 @@ const createUploadSong = async (user, input) => {
       [crypto.randomUUID(), id, row.objectKey, row.mimeType, row.byteSize],
     );
     await client.query('COMMIT');
-    return { ...mapSongRow(songResult.rows[0]), duplicate: false };
+    // Best-effort lyrics lookup. Uploaded files rarely have a reliable
+    // artist tag available here, so this is a title-only search — it will
+    // miss more often than the YouTube path, which is expected and fine.
+    const lyricsRow = await attachLyrics(id, title, String(input.artist || '').trim() || undefined);
+    return { ...mapSongRow({ ...songResult.rows[0], ...(lyricsRow || {}) }), duplicate: false };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

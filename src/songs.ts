@@ -23,6 +23,13 @@ export type Song = {
   createdAt?: string;
   updatedAt?: string;
   duplicate?: boolean;
+  // Best-effort, auto-fetched from lrclib.net when the song is added.
+  // syncedLyrics is raw .lrc-format text (parse with src/lyrics/lrc.ts);
+  // null means no match was found (or lookup hasn't run/failed).
+  syncedLyrics?: string | null;
+  plainLyrics?: string | null;
+  lyricsSource?: string | null;
+  lyricsInstrumental?: boolean;
 };
 
 import { AUTH_API_URL } from './lib/env';

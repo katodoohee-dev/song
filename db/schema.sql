@@ -66,6 +66,14 @@ ALTER TABLE songs ADD COLUMN IF NOT EXISTS source_url TEXT;
 ALTER TABLE songs ADD COLUMN IF NOT EXISTS youtube_video_id TEXT;
 ALTER TABLE songs ADD COLUMN IF NOT EXISTS artwork_url TEXT;
 ALTER TABLE songs ADD COLUMN IF NOT EXISTS source_metadata JSONB;
+-- Best-effort, timestamp-synced lyrics fetched from lrclib.net (a free,
+-- open lyrics-timing database — see lib/lyrics.mjs). We store what we get
+-- so we don't re-fetch on every page load; NULL just means no match was
+-- found yet (or the track is genuinely instrumental).
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS synced_lyrics TEXT;
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS plain_lyrics TEXT;
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS lyrics_source TEXT;
+ALTER TABLE songs ADD COLUMN IF NOT EXISTS lyrics_instrumental BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS songs_created_by_youtube_video_idx
   ON songs(created_by, youtube_video_id)
   WHERE youtube_video_id IS NOT NULL;

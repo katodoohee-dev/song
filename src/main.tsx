@@ -5,6 +5,8 @@ import { AuthPanel } from "./auth-panel";
 import { uploadFile, type StorageObject } from "./storage";
 import { youtubeApi, songsApi, type Song as ApiSong, type YouTubeMetadata } from "./songs";
 import { AUTH_API_URL } from "./lib/env";
+import { parseLrc } from "./lyrics/lrc";
+import { useMediaLyricSync } from "./lyrics/useMediaLyricSync";
 import "./styles.css";
 
 // `sourceType`/`sourceUrl` are present only for songs that came from the
@@ -12,7 +14,7 @@ import "./styles.css";
 // songs below are visual placeholders with no audio behind them, so they
 // intentionally have neither field — see useAudioEngine, which treats their
 // absence as "nothing to play" rather than pretending to play silence.
-type Song = { id?: string; youtubeVideoId?: string | null; sourceType?: string; sourceUrl?: string; title: string; artist: string; note: string; image: string };
+type Song = { id?: string; youtubeVideoId?: string | null; sourceType?: string; sourceUrl?: string; title: string; artist: string; note: string; image: string; syncedLyrics?: string | null; plainLyrics?: string | null; lyricsInstrumental?: boolean };
 const songs: Song[] = [
  {title:"Moonlit Echoes",artist:"Luna Vale",note:"Aurora Sessions",image:"https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85"},
  {title:"Velvet Hours",artist:"Mira Sol",note:"Midnight Bloom",image:"https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?auto=format&fit=crop&w=1200&q=85"},
@@ -33,7 +35,10 @@ const fromApiSong=(item:ApiSong):Song=>({
  title:item.title,
  artist:item.sourceType==='upload'?'You':'YouTube',
  note:item.note||(item.sourceType==='upload'?'Uploaded track':'YouTube'),
- image:item.artworkUrl||item.artworkFallbackUrl||'https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85'
+ image:item.artworkUrl||item.artworkFallbackUrl||'https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85',
+ syncedLyrics:item.syncedLyrics,
+ plainLyrics:item.plainLyrics,
+ lyricsInstrumental:item.lyricsInstrumental
 });
 
 // ---------------------------------------------------------------------------
@@ -207,7 +212,7 @@ function App(){
   </main>
   {view!=='karaoke'&&<Player song={song} playing={playing} onToggle={()=>setPlaying(v=>!v)} onLyrics={()=>setLyrics(true)} onKaraoke={()=>setView('karaoke')} hasRealAudio={hasRealAudio} unavailable={unavailable} progress={progress}/>} 
   {view!=='karaoke'&&<nav className="mobileNav">{nav.map(([id,label,Icon])=><button key={id} className={view===id?'mobileNavItem active':'mobileNavItem'} onClick={()=>setView(id)}><Icon size={18}/><span>{label}</span></button>)}</nav>}
-  {lyrics&&<div className="overlay"><div className="overlayTop"><button className="iconBtn" onClick={()=>setLyrics(false)}><X/></button><div><b>{song.title}</b><span>{song.artist}</span></div><MoreHorizontal/></div><div className="lyrics"><p className="faint">I still remember the night we met</p><h2><span>ฉัน ยัง รอ </span><em>เธอ</em><span> อยู่ ตรง นี้</span></h2><p className="en">I’m still waiting right here</p><p className="faint">แม้เวลาจะผ่านไปนานเท่าไร</p></div><button className="primary" onClick={()=>{setLyrics(false);setView('karaoke')}}><Mic2 size={17}/> Karaoke</button></div>}
+  {lyrics&&<LyricsOverlay song={song} currentTime={progress.currentTime} onClose={()=>setLyrics(false)} onKaraoke={()=>{setLyrics(false);setView('karaoke')}}/>}
   {add&&<AddMusicModal onClose={()=>setAdd(false)} onAdded={addSongToLibrary}/>} 
  </div>
 }
@@ -266,6 +271,34 @@ function Karaoke({song,onEnd}:{song:Song;onEnd:()=>void}){return <div className=
 function Card({song,onPlay}:{song:Song;onPlay:(s:Song)=>void}){return <article className="card" onClick={()=>onPlay(song)}><div className="cover"><div className="vinyl"/><img src={song.image}/><button className="play"><Play size={16} fill="currentColor"/></button></div><b>{song.title}</b><span>{song.artist}</span></article>}
 function Row({song,n,onPlay}:{song:Song;n:number;onPlay:(s:Song)=>void}){return <div className="row" onClick={()=>onPlay(song)}><small>{String(n).padStart(2,'0')}</small><img src={song.image}/><div><b>{song.title}</b><span>{song.artist}</span></div><span className="note">{song.note}</span><small>3:{12+n}</small><MoreHorizontal size={17}/></div>}
 function Section({title,children}:{title:string;children:React.ReactNode}){return <section className="sub"><div className="sectionTitle"><h2>{title}</h2><button className="ghost">See all <ChevronRight size={16}/></button></div>{children}</section>}
+// Shows real synced lyrics when the song has them (fetched best-effort from
+// lrclib.net at add-time — see auth-server.mjs's attachLyrics). Falls back
+// to honest empty states instead of pretending lyrics exist.
+function LyricsOverlay({song,currentTime,onClose,onKaraoke}:{song:Song;currentTime:number;onClose:()=>void;onKaraoke:()=>void}){
+ const parsed = useMemo(()=>{
+  if(!song.syncedLyrics) return null;
+  const result = parseLrc(song.syncedLyrics);
+  return result.lines.length ? result.lines : null;
+ },[song.syncedLyrics]);
+ const {active} = useMediaLyricSync(currentTime, parsed||[]);
+ const body = parsed
+  ? (()=>{
+     const current = active>=0 ? parsed[active] : null;
+     const next = active>=0 && active+1<parsed.length ? parsed[active+1] : (active<0 && parsed.length ? parsed[0] : null);
+     return <>
+      <p className="faint">{active>0?parsed[active-1].text:'\u00a0'}</p>
+      <h2>{current?current.text:'\u00a0'}</h2>
+      <p className="en">{next?next.text:'\u00a0'}</p>
+     </>;
+    })()
+  : song.lyricsInstrumental
+   ? <p className="faint">This track is instrumental — no lyrics to show.</p>
+   : song.plainLyrics
+    ? <p className="faint" style={{whiteSpace:'pre-line',lineHeight:1.8}}>{song.plainLyrics}</p>
+    : <p className="faint">No synced lyrics found for this track yet.</p>;
+ return <div className="overlay"><div className="overlayTop"><button className="iconBtn" onClick={onClose}><X/></button><div><b>{song.title}</b><span>{song.artist}</span></div><MoreHorizontal/></div><div className="lyrics">{body}</div><button className="primary" onClick={onKaraoke}><Mic2 size={17}/> Karaoke</button></div>;
+}
+
 function Player({song,playing,onToggle,onLyrics,onKaraoke,hasRealAudio,unavailable,progress}:{song:Song;playing:boolean;onToggle:()=>void;onLyrics:()=>void;onKaraoke:()=>void;hasRealAudio:boolean;unavailable:boolean;progress:{currentTime:number;duration:number}}){
  const pct = hasRealAudio && progress.duration > 0 ? Math.min(100, (progress.currentTime / progress.duration) * 100) : 0;
  return <div className="player"><div className="now"><img src={song.image}/><div><b>{song.title}</b><span>{unavailable?'Playback unavailable':!hasRealAudio?'Preview not available':song.artist}</span></div><Heart size={17}/></div><div className="controls"><div><button><SkipBack/></button><button className="primary circle" onClick={onToggle} disabled={!hasRealAudio} style={{opacity:hasRealAudio?1:.5,cursor:hasRealAudio?'pointer':'not-allowed'}} title={hasRealAudio?undefined:'This track has no playable audio source'}>{playing?<Pause fill="currentColor"/>:<Play fill="currentColor"/>}</button><button><SkipForward/></button></div><div className="progress"><span>{hasRealAudio?formatTime(progress.currentTime):'0:00'}</span><div><i style={{width:`${pct}%`}}/></div><span>{hasRealAudio?formatTime(progress.duration):'--:--'}</span></div></div><div className="right"><button className="ghost" onClick={onLyrics}><Sparkles/> Lyrics</button><button className="ghost" onClick={onKaraoke}><Mic2/></button><Volume2 size={16}/></div></div>
