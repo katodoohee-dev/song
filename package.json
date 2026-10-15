@@ -10,7 +10,8 @@
     "start": "node server.mjs",
     "auth:start": "node auth-server.mjs",
     "db:migrate": "node db/migrate.mjs",
-    "db:health": "node db/health.mjs"
+    "db:health": "node db/health.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",

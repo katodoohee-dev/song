@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { studioRoute } from './lib/studio.mjs';
 import crypto from 'node:crypto';
 import { readFile, writeFile, rename, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -354,6 +355,11 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+    if (await studioRoute(req, res, url, { currentUser, readBody, send, getAudio: async (userId, id) => {
+      const row = await getStorageRow(userId, id);
+      if (!row || !row.mimeType.startsWith('audio/')) throw Object.assign(new Error('ไม่พบไฟล์เสียง'), { status: 404 });
+      return row.storageDriver === 'postgres' ? row.data : readFile(storagePath(row.objectKey));
+    } })) return;
     if (url.pathname === '/health') {
       let database = false;
       if (pool) { await pool.query('SELECT 1'); database = true; }
