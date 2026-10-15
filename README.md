@@ -48,3 +48,17 @@ npm test
 ```
 
 Tests cover input URL restrictions, authentication, disabled-processing behavior and unavailable output access. These do not establish audio quality or production readiness. Before launch, process an authorized full song on the target host, check both stems and Thai transcription, verify disk persistence across restart, and test browser sign-in with the actual frontend/API domains.
+
+### Browser regression checks
+
+Fonts are bundled with the frontend, including Thai glyphs; Google Fonts is no longer required.
+
+```sh
+npx playwright install chromium
+npm run build
+npm run test:ui
+```
+
+For an existing Chromium binary, set `CHROMIUM_EXECUTABLE=/path/to/chromium`. Optional `UI_SCREENSHOTS=/tmp/song-ui` saves desktop and mobile screenshots. The UI test uses mocked API responses and checks 320/390/768/1440-pixel layouts, local Thai font loading, 60 lyric lines across ten pages, row overlap, navigation and browser errors. It does not verify the audio models.
+
+Verified on 2026-10-15: browser checks passed with Chromium 153, as did typecheck, production build and five API unit tests. Real model execution and deployment still require the selected hosting workspace and configured processing machine.

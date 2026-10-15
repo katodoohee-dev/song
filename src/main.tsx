@@ -5,6 +5,14 @@ import { AuthPanel } from './auth-panel';
 import { AUTH_API_URL } from './lib/env';
 import { uploadFile } from './storage';
 import { parseLrc, toLrc } from './lyrics/lrc';
+import '@fontsource/noto-sans-thai/400.css';
+import '@fontsource/noto-sans-thai/500.css';
+import '@fontsource/noto-sans-thai/600.css';
+import '@fontsource/noto-sans-thai/700.css';
+import '@fontsource/dm-sans/400.css';
+import '@fontsource/dm-sans/500.css';
+import '@fontsource/dm-sans/600.css';
+import '@fontsource/dm-sans/700.css';
 import './styles.css';
 
 type Line = { start: number; end: number; text: string };
