@@ -1,274 +1,123 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
-import { Home, Search, Library, Mic2, Play, Pause, Heart, ChevronRight, Sparkles, MoreHorizontal, X, Plus, Volume2, Shuffle, SkipBack, SkipForward, Repeat2, Upload, Link2, Music2, CheckCircle2 } from "lucide-react";
-import { AuthPanel } from "./auth-panel";
-import { uploadFile, type StorageObject } from "./storage";
-import { youtubeApi, songsApi, type Song as ApiSong, type YouTubeMetadata } from "./songs";
-import { AUTH_API_URL } from "./lib/env";
-import "./styles.css";
+import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { AudioLines, ArrowUpRight, Check, ChevronLeft, ChevronRight, Download, FileAudio, Headphones, Library, Link2, LoaderCircle, Mic2, Music2, Plus, Search, Sparkles, Upload, X } from 'lucide-react';
+import { AuthPanel } from './auth-panel';
+import { AUTH_API_URL } from './lib/env';
+import { uploadFile } from './storage';
+import { parseLrc, toLrc } from './lyrics/lrc';
+import '@fontsource/noto-sans-thai/400.css';
+import '@fontsource/noto-sans-thai/500.css';
+import '@fontsource/noto-sans-thai/600.css';
+import '@fontsource/noto-sans-thai/700.css';
+import '@fontsource/dm-sans/400.css';
+import '@fontsource/dm-sans/500.css';
+import '@fontsource/dm-sans/600.css';
+import '@fontsource/dm-sans/700.css';
+import './styles.css';
 
-// `sourceType`/`sourceUrl` are present only for songs that came from the
-// real backend (YouTube import or an uploaded file). The five bundled demo
-// songs below are visual placeholders with no audio behind them, so they
-// intentionally have neither field — see useAudioEngine, which treats their
-// absence as "nothing to play" rather than pretending to play silence.
-type Song = { id?: string; youtubeVideoId?: string | null; sourceType?: string; sourceUrl?: string; title: string; artist: string; note: string; image: string };
-const songs: Song[] = [
- {title:"Moonlit Echoes",artist:"Luna Vale",note:"Aurora Sessions",image:"https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85"},
- {title:"Velvet Hours",artist:"Mira Sol",note:"Midnight Bloom",image:"https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?auto=format&fit=crop&w=1200&q=85"},
- {title:"Northern Lines",artist:"Aster",note:"Quiet Horizons",image:"https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1200&q=85"},
- {title:"After the Rain",artist:"Noon & Night",note:"City Weather",image:"https://images.unsplash.com/photo-1494438639946-1ebd1d20bf85?auto=format&fit=crop&w=1200&q=85"},
- {title:"Slow Bloom",artist:"Nara",note:"New this week",image:"https://images.unsplash.com/photo-1524368535928-5b5e00ddc76b?auto=format&fit=crop&w=1200&q=85"}
-];
-const nav=[['home','Home',Home],['search','Search',Search],['library','Library',Library],['karaoke','Karaoke',Mic2]] as const;
-
-const fromApiSong=(item:ApiSong):Song=>({
- id:item.id,
- youtubeVideoId:item.youtubeVideoId,
- sourceType:item.sourceType,
- // Upload sources come back as a relative API path (/api/storage/object/:id);
- // YouTube sources are already an absolute watch URL. Normalize both into
- // something useAudioEngine can act on directly.
- sourceUrl:item.sourceType==='upload' && item.sourceUrl ? `${AUTH_API_URL}${item.sourceUrl}` : item.sourceUrl,
- title:item.title,
- artist:item.sourceType==='upload'?'You':'YouTube',
- note:item.note||(item.sourceType==='upload'?'Uploaded track':'YouTube'),
- image:item.artworkUrl||item.artworkFallbackUrl||'https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85'
-});
-
-// ---------------------------------------------------------------------------
-// Real audio playback.
-//
-// Two real sources exist in this app:
-//  - Uploaded files: playable directly through an <audio> element pointed at
-//    /api/storage/object/:id (the browser sends the session cookie for this
-//    cross-site request because the auth API sets SameSite=None; Secure).
-//  - YouTube imports: YouTube does not provide a raw audio stream URL (and
-//    scraping one would violate YouTube's Terms of Service), so playback
-//    goes through YouTube's own IFrame Player API, which is the supported,
-//    ToS-compliant way to play a YouTube video's audio/video from a webpage.
-// Demo/placeholder songs (no sourceType) have no real audio anywhere, so
-// this hook simply does nothing for them instead of faking playback.
-// ---------------------------------------------------------------------------
-function loadYouTubeIframeApi(): Promise<any> {
-  return new Promise(resolve => {
-    const w = window as any;
-    if (w.YT && w.YT.Player) { resolve(w.YT); return; }
-    if (!document.getElementById('youtube-iframe-api')) {
-      const script = document.createElement('script');
-      script.id = 'youtube-iframe-api';
-      script.src = 'https://www.youtube.com/iframe_api';
-      document.body.appendChild(script);
-    }
-    const previous = w.onYouTubeIframeAPIReady;
-    w.onYouTubeIframeAPIReady = () => { previous?.(); resolve(w.YT); };
-  });
+type Line = { start: number; end: number; text: string };
+type Job = { id: string; title: string; status: 'queued'|'processing'|'completed'|'failed'; lines: Line[]; error?: string; createdAt: string };
+const labels = { queued: 'รอคิว', processing: 'กำลังประมวลผล', completed: 'พร้อมใช้งาน', failed: 'ไม่สำเร็จ' };
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${AUTH_API_URL}/api/studio/${path}`, { credentials: 'include', ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) throw new Error(data?.error || 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่');
+  return data;
 }
-
-function useAudioEngine(song: Song, playing: boolean) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const ytPlayerRef = useRef<any>(null);
-  const ytReadyRef = useRef(false);
-  const containerId = useRef(`yt-player-${Math.random().toString(36).slice(2)}`);
-  const [unavailable, setUnavailable] = useState(false);
-
+const clock = (time: number) => `${Math.floor(time / 60)}:${String(Math.floor(time % 60)).padStart(2, '0')}`;
+function App() {
+  const [view, setView] = useState('studio');
+  const [mode, setMode] = useState('link');
+  const [url, setUrl] = useState('');
+  const [file, setFile] = useState<File|null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [job, setJob] = useState<Job|null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [youtube, setYoutube] = useState(false);
+  const [enabled, setEnabled] = useState<boolean|null>(null);
+  const [query, setQuery] = useState('');
+  const [stem, setStem] = useState('instrumental');
+  const [audioUrl, setAudioUrl] = useState('');
+  const [time, setTime] = useState(0);
+  const [page, setPage] = useState(0);
+  const [auto, setAuto] = useState(true);
+  const [custom, setCustom] = useState<Line[]|null>(null);
+  const audio = useRef<HTMLAudioElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const lines = custom ?? job?.lines ?? [];
+  const perPage = 6;
+  const pages = Math.max(1, Math.ceil(lines.length / perPage));
+  const active = lines.findIndex(l => time >= l.start && time < l.end);
+  useEffect(() => { api<{enabled:boolean;youtube:boolean}>('capabilities').then(v => { setEnabled(v.enabled); setYoutube(v.youtube); }).catch(() => setEnabled(false)); }, []);
+  const refresh = () => api<{jobs:Job[]}>('jobs').then(v => setJobs(v.jobs)).catch(e => setError(e.message));
+  useEffect(() => { if (view === 'library') void refresh(); }, [view]);
   useEffect(() => {
-    const audio = new Audio();
-    audio.preload = 'none';
-    audioRef.current = audio;
-    return () => { audio.pause(); audio.src = ''; };
-  }, []);
-
-  // Swap sources whenever the selected song changes.
+    if (!job || !['queued', 'processing'].includes(job.status)) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      api<{job:Job}>(`jobs/${job.id}`).then(v => { if (!cancelled) setJob(v.job); }).catch(e => { if (!cancelled) setError(e.message); });
+    }, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [job?.id, job?.status]);
+  useEffect(() => { setCustom(null); setPage(0); setTime(0); }, [job?.id]);
+  useEffect(() => { if (auto && active >= 0) setPage(Math.floor(active / perPage)); }, [active, auto]);
   useEffect(() => {
-    setUnavailable(false);
-    if (song.sourceType === 'youtube' && song.youtubeVideoId) {
-      audioRef.current?.pause();
-      const videoId = song.youtubeVideoId;
-      loadYouTubeIframeApi().then(YT => {
-        if (!ytPlayerRef.current) {
-          const el = document.createElement('div');
-          el.id = containerId.current;
-          el.style.position = 'fixed';
-          el.style.bottom = '0';
-          el.style.right = '0';
-          el.style.width = '1px';
-          el.style.height = '1px';
-          el.style.opacity = '0';
-          el.style.pointerEvents = 'none';
-          document.body.appendChild(el);
-          ytPlayerRef.current = new YT.Player(containerId.current, {
-            videoId,
-            playerVars: { playsinline: 1 },
-            events: {
-              onReady: () => { ytReadyRef.current = true; if (playing) ytPlayerRef.current.playVideo(); },
-              onError: () => setUnavailable(true),
-            },
-          });
-        } else {
-          ytReadyRef.current = false;
-          ytPlayerRef.current.loadVideoById(videoId);
-          ytReadyRef.current = true;
-          if (!playing) ytPlayerRef.current.pauseVideo();
-        }
-      });
-    } else if (song.sourceType === 'upload' && song.sourceUrl) {
-      ytPlayerRef.current?.pauseVideo?.();
-      if (audioRef.current) {
-        audioRef.current.src = song.sourceUrl;
-        audioRef.current.onerror = () => setUnavailable(true);
-        if (playing) audioRef.current.play().catch(() => setUnavailable(true));
+    setAudioUrl('');
+    if (job?.status !== 'completed') return;
+    const controller = new AbortController(); let objectUrl = '';
+    fetch(`${AUTH_API_URL}/api/studio/jobs/${job.id}/${stem}`, { credentials: 'include', signal: controller.signal }).then(async r => {
+      if (!r.ok) throw new Error('โหลดไฟล์เสียงไม่สำเร็จ');
+      const blob = await r.blob();
+      if (!controller.signal.aborted) { objectUrl = URL.createObjectURL(blob); setAudioUrl(objectUrl); }
+    }).catch(e => { if (e.name !== 'AbortError') setError(e.message); });
+    return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [job?.id, job?.status, stem]);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault(); setError(''); setBusy(true);
+    try {
+      let body: Record<string, string>;
+      if (mode === 'file') {
+        if (!file) throw new Error('เลือกไฟล์เสียงก่อนเริ่ม');
+        const object = await uploadFile(file);
+        body = { objectId: object.id, title: file.name.replace(/\.[^.]+$/, '') };
+      } else {
+        if (!url.trim()) throw new Error('วางลิงก์ไฟล์เสียงก่อนเริ่ม');
+        body = { url: url.trim(), title: new URL(url.trim()).pathname.split('/').pop() || 'Linked track' };
       }
-    } else {
-      // Demo/placeholder song — nothing real to play.
-      ytPlayerRef.current?.pauseVideo?.();
-      audioRef.current?.pause();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [song.id, song.sourceType, song.sourceUrl, song.youtubeVideoId]);
-
-  // React to play/pause toggles without reloading the source.
-  useEffect(() => {
-    if (song.sourceType === 'youtube' && ytPlayerRef.current && ytReadyRef.current) {
-      playing ? ytPlayerRef.current.playVideo() : ytPlayerRef.current.pauseVideo();
-    } else if (song.sourceType === 'upload' && audioRef.current) {
-      if (playing) audioRef.current.play().catch(() => setUnavailable(true));
-      else audioRef.current.pause();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing]);
-
-  const hasRealAudio = Boolean((song.sourceType === 'youtube' && song.youtubeVideoId) || (song.sourceType === 'upload' && song.sourceUrl));
-
-  const [progress, setProgress] = useState({ currentTime: 0, duration: 0 });
-  useEffect(() => {
-    if (!hasRealAudio) { setProgress({ currentTime: 0, duration: 0 }); return; }
-    if (song.sourceType === 'upload') {
-      const audio = audioRef.current;
-      if (!audio) return;
-      const update = () => setProgress({ currentTime: audio.currentTime || 0, duration: audio.duration || 0 });
-      audio.addEventListener('timeupdate', update);
-      audio.addEventListener('loadedmetadata', update);
-      return () => { audio.removeEventListener('timeupdate', update); audio.removeEventListener('loadedmetadata', update); };
-    }
-    if (song.sourceType === 'youtube') {
-      // The YouTube IFrame API has no timeupdate event, so poll it.
-      const interval = setInterval(() => {
-        const player = ytPlayerRef.current;
-        if (player && ytReadyRef.current && typeof player.getCurrentTime === 'function') {
-          setProgress({ currentTime: player.getCurrentTime() || 0, duration: player.getDuration() || 0 });
-        }
-      }, 500);
-      return () => clearInterval(interval);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasRealAudio, song.sourceType, song.id]);
-
-  return { hasRealAudio, unavailable, progress };
-}
-
-const formatTime = (seconds: number) => {
-  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-  const total = Math.floor(seconds);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
-};
-
-function App(){
- const [view,setView]=useState<'home'|'search'|'library'|'karaoke'>('home');
- const [librarySongs,setLibrarySongs]=useState<Song[]>(songs);
- const [song,setSong]=useState(songs[0]); const [playing,setPlaying]=useState(false); const [lyrics,setLyrics]=useState(false); const [query,setQuery]=useState(''); const [add,setAdd]=useState(false);
- const { hasRealAudio, unavailable, progress } = useAudioEngine(song, playing);
- useEffect(()=>{
-  let active=true;
-  youtubeApi.list().then(({songs:remote})=>{
-   if(!active)return;
-   const mapped=remote.map(fromApiSong);
-   setLibrarySongs([...mapped,...songs.filter(local=>!mapped.some(item=>item.youtubeVideoId&&item.youtubeVideoId===local.youtubeVideoId))]);
-  }).catch(()=>undefined);
-  return()=>{active=false};
- },[]);
- const filtered=useMemo(()=>librarySongs.filter(s=>(s.title+' '+s.artist+' '+s.note).toLowerCase().includes(query.trim().toLowerCase())),[librarySongs,query]);
- const addSongToLibrary=(item:ApiSong)=>{
-  const mapped=fromApiSong(item);
-  setLibrarySongs(current=>[mapped,...current.filter(existing=>existing.youtubeVideoId!==mapped.youtubeVideoId && existing.id!==mapped.id)]);
-  setSong(mapped);
- };
- const play=(s:Song)=>{setSong(s);setPlaying(true)};
- return <div className="app">
-  {view!=='karaoke'&&<aside className="sidebar"><div className="brand"><span className="brandMark"><Music2 size={17}/></span><b>Song Note</b></div><nav>{nav.map(([id,label,Icon])=><button key={id} className={view===id?'nav active':'nav'} onClick={()=>setView(id)}><Icon size={18}/>{label}</button>)}</nav><AuthPanel/></aside>}
-  {view!=='karaoke'&&<header className="mobileHeader"><div className="brand"><span className="brandMark"><Music2 size={17}/></span><b>Song Note</b></div><AuthPanel/></header>}
-  <main className={view==='karaoke'?'main karaoke':'main'}>
-   {view==='home'&&<HomeView onPlay={play}/>} 
-   {view==='search'&&<SearchView query={query} setQuery={setQuery} songs={filtered} onPlay={play}/>} 
-   {view==='library'&&<LibraryView songs={librarySongs} onPlay={play} onAdd={()=>setAdd(true)}/>} 
-   {view==='karaoke'&&<Karaoke song={song} onEnd={()=>setView('home')}/>} 
-  </main>
-  {view!=='karaoke'&&<Player song={song} playing={playing} onToggle={()=>setPlaying(v=>!v)} onLyrics={()=>setLyrics(true)} onKaraoke={()=>setView('karaoke')} hasRealAudio={hasRealAudio} unavailable={unavailable} progress={progress}/>} 
-  {view!=='karaoke'&&<nav className="mobileNav">{nav.map(([id,label,Icon])=><button key={id} className={view===id?'mobileNavItem active':'mobileNavItem'} onClick={()=>setView(id)}><Icon size={18}/><span>{label}</span></button>)}</nav>}
-  {lyrics&&<div className="overlay"><div className="overlayTop"><button className="iconBtn" onClick={()=>setLyrics(false)}><X/></button><div><b>{song.title}</b><span>{song.artist}</span></div><MoreHorizontal/></div><div className="lyrics"><p className="faint">I still remember the night we met</p><h2><span>ฉัน ยัง รอ </span><em>เธอ</em><span> อยู่ ตรง นี้</span></h2><p className="en">I’m still waiting right here</p><p className="faint">แม้เวลาจะผ่านไปนานเท่าไร</p></div><button className="primary" onClick={()=>{setLyrics(false);setView('karaoke')}}><Mic2 size={17}/> Karaoke</button></div>}
-  {add&&<AddMusicModal onClose={()=>setAdd(false)} onAdded={addSongToLibrary}/>} 
- </div>
-}
-
-function AddMusicModal({onClose,onAdded}:{onClose:()=>void;onAdded:(song:ApiSong)=>void}){
- const [busy,setBusy]=useState(false); const [message,setMessage]=useState(''); const [uploaded,setUploaded]=useState<StorageObject|null>(null);
- const [link,setLink]=useState(''); const [metadata,setMetadata]=useState<YouTubeMetadata|null>(null); const [saving,setSaving]=useState(false);
- const handleFile=async(e:React.ChangeEvent<HTMLInputElement>)=>{
-  const file=e.target.files?.[0]; if(!file)return; setBusy(true); setMessage(''); setUploaded(null);
-  try {
-   const object=await uploadFile(file);
-   setUploaded(object);
-   // Uploading only stores the raw bytes. Turn it into an actual library
-   // entry (songs + tracks + audio_files rows) so it shows up in Library.
-   try {
-    const title=file.name.replace(/\.[a-z0-9]+$/i,'')||object.filename;
-    const result=await songsApi.createFromUpload(object.id, title);
-    onAdded(result.song);
-    setMessage('Upload complete — added to your library.');
-   } catch(linkError){
-    const status=linkError instanceof Error?(linkError as Error & {status?:number}).status:undefined;
-    setMessage(status===503
-     ?'File uploaded, but your library needs the database connection to save it as a song. Ask an admin to check the database configuration.'
-     :linkError instanceof Error?linkError.message:'Upload succeeded, but could not add it to your library.');
-   }
+      const result = await api<{job:Job}>('jobs', { method: 'POST', body: JSON.stringify(body) });
+      setJob(result.job); setView('studio');
+    } catch (e) { setError(e instanceof Error ? e.message : 'เกิดข้อผิดพลาด'); }
+    finally { setBusy(false); }
   }
-  catch(error){ setMessage(error instanceof Error?error.message:'Upload failed.'); }
-  finally { setBusy(false); e.target.value=''; }
- };
- const loadLink=async()=>{
-  const value=link.trim(); if(!value){setMessage('Paste a YouTube link first.');return;}
-  setSaving(true); setMessage(''); setMetadata(null);
-  try { const result=await youtubeApi.metadata(value); setMetadata(result.metadata); }
-  catch(error){
-   const status=error instanceof Error ? (error as Error & {status?:number}).status : undefined;
-   setMessage(status===401?'Sign in before adding a song to your library.':error instanceof Error?error.message:'Could not read YouTube metadata.');
+  function exportLyrics() {
+    const content = toLrc(lines.map((l, index) => ({ index, text: l.text, startTime: l.start, endTime: l.end })), { ti: job?.title || 'Lyrics' });
+    const href = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a'); a.href = href; a.download = 'song-note.lrc'; a.click(); setTimeout(() => URL.revokeObjectURL(href), 1000);
   }
-  finally { setSaving(false); }
- };
- const saveLink=async()=>{
-  if(!metadata){await loadLink();return;}
-  setSaving(true); setMessage('');
-  try { const result=await youtubeApi.createSong(metadata.url); onAdded(result.song); setMessage(result.song.duplicate?'Song already exists in your library.':'Song added to your library.'); }
-  catch(error){
-   const status=error instanceof Error ? (error as Error & {status?:number}).status : undefined;
-   setMessage(status===401?'Sign in before saving songs to your library.':error instanceof Error?error.message:'Could not save song.');
+  async function importLyrics(file?: File) {
+    if (!file) return;
+    if (file.size > 1024 * 1024) { setError('ไฟล์เนื้อร้องต้องไม่เกิน 1 MB'); return; }
+    const result = parseLrc(await file.text());
+    if (!result.lines.length) { setError('ไม่พบเนื้อร้องพร้อมเวลาในไฟล์ LRC'); return; }
+    setCustom(result.lines.map(l => ({ start: l.startTime, end: l.endTime ?? Number.MAX_SAFE_INTEGER, text: l.text })));
+    setPage(0); setError('');
   }
-  finally { setSaving(false); }
- };
- return <div className="modalShade" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}><div className="record"><Music2 size={34}/><span>SONG NOTE</span></div><div className="modalBody"><h2>Add Music</h2><p>Bring a song into your library.</p><label className="primary wide" style={{cursor:busy?'wait':'pointer',opacity:busy?.6:1}}><Upload size={17}/>{busy?'Uploading…':'Upload music'}<input type="file" accept="audio/*" hidden disabled={busy} onChange={handleFile}/></label>{uploaded&&<div style={{display:'flex',alignItems:'center',gap:8,margin:'10px 0',color:'#d8ff66',fontSize:13}}><CheckCircle2 size={17}/><span>{uploaded.filename}</span></div>}<div style={{display:'grid',gap:8,marginTop:10}}><input value={link} onChange={e=>{setLink(e.target.value);setMetadata(null)}} placeholder="Paste YouTube link" style={{width:'100%',padding:'12px 14px',borderRadius:10,border:'1px solid rgba(255,255,255,.14)',background:'rgba(255,255,255,.05)',color:'inherit'}}/><button className="secondary wide" onClick={saveLink} disabled={saving}>{saving?(metadata?'Adding…':'Reading YouTube…'):<><Link2 size={17}/>{metadata?'Add YouTube song':'Get song info'}</>}</button></div>{metadata&&<div style={{display:'flex',gap:10,alignItems:'center',margin:'12px 0'}}><img src={metadata.artworkUrl} onError={e=>{e.currentTarget.src=metadata.artworkFallbackUrl}} style={{width:64,height:64,objectFit:'cover',borderRadius:8}}/><div style={{minWidth:0}}><b style={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{metadata.title}</b><span style={{fontSize:12,opacity:.7}}>{metadata.authorName||'YouTube'}</span></div></div>}{message&&<div style={{margin:'10px 0',fontSize:13,color:/complete|added|exists/i.test(message)?'#d8ff66':'#ff8e8e'}}>{message}</div>}<button className="ghost wide" onClick={onClose}>Close</button></div></div></div>
+  const lyricPanel = <section className="panel lyricsPanel">
+    <div className="panelHeading"><div><span className="eyebrow">FOLLOW EVERY WORD</span><h2>เนื้อร้องของคุณ</h2></div><span className="tag">{lines.length} บรรทัด</span></div>
+    <div className="lyricsToolbar"><label className="smallButton"><Upload size={14}/> นำเข้า LRC<input type="file" accept=".lrc,text/plain" hidden onChange={e => void importLyrics(e.target.files?.[0])}/></label><button className="smallButton" disabled={!lines.length} onClick={exportLyrics}><Download size={14}/> ส่งออก</button><label className="follow"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)}/> ตามเพลง</label></div>
+    {lines.length ? <div className="lyricLines">{lines.slice(page * perPage, (page + 1) * perPage).map((line, index) => <button key={`${page}-${index}`} className={`lyricLine ${active === page * perPage + index ? 'current' : ''}`} onClick={() => { setTime(line.start); if (audio.current) audio.current.currentTime = line.start; }}><time>{clock(line.start)}</time><span>{line.text}</span></button>)}</div> : <div className="emptyLyrics"><div className="emptyIcon"><Mic2 size={28}/></div><h3>ให้ทุกคำร้องมีพื้นที่ของตัวเอง</h3><p>เนื้อร้องพร้อมเวลาจะปรากฏเมื่อประมวลผลเสร็จ<br/>หรือนำเข้าไฟล์ LRC ที่คุณมีอยู่แล้ว</p><span className="miniWave">▂ ▅ ▃ ▇ ▅ ▂ ▄ ▆ ▃</span></div>}
+    <div className="pagination"><span>หน้า {page + 1} / {pages}</span><div><button aria-label="หน้าก่อน" disabled={page === 0} onClick={() => { setAuto(false); setPage(p => p - 1); }}><ChevronLeft size={18}/></button><button aria-label="หน้าถัดไป" disabled={page + 1 >= pages} onClick={() => { setAuto(false); setPage(p => p + 1); }}><ChevronRight size={18}/></button></div></div>
+  </section>;
+  return <div className="app"><aside className="sidebar"><a className="brand" href="#" onClick={() => setView('studio')}><span className="brandMark"><AudioLines size={23}/></span>song<span className="brandLight">note</span><i/></a><div className="navCaption">YOUR CREATIVE SPACE</div><nav>{[['studio', 'สตูดิโอ', AudioLines], ['library', 'คลังเพลง', Library], ['lyrics', 'เนื้อร้อง', Mic2], ['guide', 'วิธีใช้งาน', Headphones]].map(([id, label, Icon]) => { const I = Icon as typeof AudioLines; return <button key={String(id)} className={`nav ${view === id ? 'active' : ''}`} onClick={() => { setView(String(id)); setError(''); }}><I size={19}/><span>{String(label)}</span>{view === id && <i/>}</button>; })}</nav><div className="sidebarNote"><Sparkles size={19}/><h3>Made for your next take.</h3><p>แยกเสียง ฝึกร้อง และค้นพบ<br/>รายละเอียดใหม่ในเพลงของคุณ</p></div><AuthPanel/></aside>
+    <main className="main"><header className="topbar"><span>WORKSPACE <ChevronRight size={12}/> {view.toUpperCase()}</span><span className="service"><i className={enabled ? 'ready' : ''}/>{enabled === null ? 'กำลังเชื่อมต่อ' : enabled ? 'เปิดประมวลผลแล้ว' : 'ยังไม่เปิดประมวลผล'}</span></header>
+    <div className="pageHeading"><div><p className="eyebrow">LESS NOISE. MORE YOU.</p><h1>{view === 'library' ? 'คลังเพลงของคุณ' : view === 'lyrics' ? 'ทุกคำร้อง ชัดเจน' : view === 'guide' ? 'เริ่มต้นเสียงใหม่' : <>ทุกเสียง มีความเป็นไปได้<span>.</span></>}</h1><p>แยกเสียงร้องและดนตรี พร้อมเนื้อร้องในพื้นที่สร้างสรรค์เดียวกัน</p></div><div className="studioBadge"><AudioLines/><span>SONG NOTE<br/><b>STUDIO / 01</b></span></div></div>
+    {error && <div className="notice error" role="alert"><span>{error}</span><button aria-label="ปิดข้อความ" onClick={() => setError('')}><X size={17}/></button></div>}
+    {view === 'studio' && <><div className="studioGrid"><div className="leftColumn"><section className="importPanel panel"><div className="panelHeading"><div><span className="eyebrow">01 / BRING YOUR SOUND</span><h2>เริ่มจากเพลงที่คุณรัก</h2></div><div className="roundIcon"><Plus size={20}/></div></div><div className="tabs" role="tablist"><button role="tab" aria-selected={mode === 'link'} className={mode === 'link' ? 'selected' : ''} onClick={() => setMode('link')}><Link2 size={16}/> วางลิงก์เพลง</button><button role="tab" aria-selected={mode === 'file'} className={mode === 'file' ? 'selected' : ''} onClick={() => setMode('file')}><Upload size={16}/> อัปโหลดไฟล์</button></div><form onSubmit={submit}>{mode === 'link' ? <div className="urlInput"><Link2 size={19}/><input aria-label="ลิงก์ไฟล์เสียง" type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://your-domain.com/song.mp3" required/></div> : <button type="button" className="dropzone" onClick={() => input.current?.click()}><FileAudio size={28}/><b>{file?.name || 'เลือกไฟล์เพลงจากเครื่อง'}</b><span>MP3, WAV, M4A, FLAC · 50 MB · ประมวลผล 15 นาทีแรก</span><input ref={input} hidden type="file" accept="audio/*,.mp3,.wav,.m4a,.flac" onChange={e => setFile(e.target.files?.[0] || null)}/></button>}<p className="inputHint">{mode === 'link' ? (youtube ? 'รองรับ YouTube สาธารณะและลิงก์ไฟล์เสียงที่อนุญาต • สูงสุด 15 นาที' : 'รองรับลิงก์ไฟล์เสียงตรงจากโดเมนที่เปิดใช้งาน • YouTube ยังไม่เปิดใช้') : 'ใช้เพลงที่คุณเป็นเจ้าของหรือได้รับอนุญาตให้ประมวลผล'}</p><div className="outputPills"><span><Check size={13}/> เสียงร้อง</span><span><Check size={13}/> ดนตรี</span><span><Check size={13}/> เนื้อร้องตามเวลา</span></div><button className="primary" disabled={busy || !enabled || (job != null && ['queued', 'processing'].includes(job.status))}>{busy ? <LoaderCircle className="spin" size={18}/> : <Sparkles size={18}/>} {busy ? 'กำลังส่งเพลง…' : 'แยกเสียงและสร้างเนื้อร้อง'}<ArrowUpRight size={18}/></button></form><p className="finePrint">คุณภาพการแยกเสียงและถอดคำขึ้นอยู่กับต้นฉบับ อาจต้องแก้เนื้อร้องบางคำ</p></section>
+    <section className="panel outputPanel"><div className="panelHeading"><div><span className="eyebrow">02 / MAKE IT YOURS</span><h2>{job?.title || 'ห้องมิกซ์เสียงของคุณ'}</h2></div>{job && <span className={`tag ${job.status}`}>{labels[job.status]}</span>}</div>{job?.error && <p role="alert" className="failure">{job.error}</p>}<div className="stemCards">{[['vocals', 'เสียงร้อง', Mic2, 'VOCALS'], ['instrumental', 'เสียงดนตรี', Music2, 'INSTRUMENTAL']].map(([id, title, Icon, sub]) => { const I = Icon as typeof Mic2; return <button key={String(id)} className={`stemCard ${stem === id ? 'selected' : ''}`} onClick={() => { setStem(String(id)); setTime(0); }}><I size={22}/><span><b>{String(title)}</b><small>{String(sub)}</small></span><i/></button>; })}</div>{audioUrl ? <><audio key={audioUrl} ref={audio} src={audioUrl} controls onTimeUpdate={e => setTime(e.currentTarget.currentTime)}/><a className="download" href={audioUrl} download={`${stem}.wav`}><Download size={15}/> ดาวน์โหลด {stem === 'vocals' ? 'เสียงร้อง' : 'เสียงดนตรี'} WAV</a></> : <div className="audioWaiting">{job && ['processing', 'queued'].includes(job.status) ? <><LoaderCircle size={18} className="spin"/> กำลังแยกเสียงและถอดเนื้อร้อง อาจใช้เวลาหลายนาที</> : job?.status === 'completed' ? 'กำลังโหลดเสียง…' : 'ไฟล์เสียงที่แยกแล้วจะปรากฏที่นี่'}</div>}</section></div>{lyricPanel}</div><div className="workflow"><span><b>01</b> นำเข้าเพลง</span><ChevronRight size={15}/><span><b>02</b> แยกเสียงด้วย AI</span><ChevronRight size={15}/><span><b>03</b> ฝึกร้องในแบบของคุณ</span><span className="workflowEnd">YOUR SOUND, REIMAGINED.</span></div></>}
+    {view === 'lyrics' && lyricPanel}
+    {view === 'library' && <section className="panel"><div className="panelHeading"><h2>โปรเจกต์ทั้งหมด</h2><button className="smallButton" onClick={() => void refresh()}>รีเฟรช</button></div><div className="urlInput"><Search size={18}/><input aria-label="ค้นหาเพลง" placeholder="ค้นหาเพลงของคุณ" value={query} onChange={e => setQuery(e.target.value)}/></div><div className="jobList">{jobs.filter(j => j.title.toLowerCase().includes(query.toLowerCase())).map(j => <button key={j.id} onClick={() => { setJob(j); setView('studio'); }}><div className="roundIcon"><Music2 size={18}/></div><span><b>{j.title}</b><small>{new Date(j.createdAt).toLocaleString('th-TH')}</small></span><span className="tag">{labels[j.status]}</span><ChevronRight size={17}/></button>)}</div>{!jobs.length && <div className="emptyLyrics"><Library size={32}/><h3>พื้นที่สำหรับเพลงของคุณ</h3><p>เข้าสู่ระบบแล้วเริ่มประมวลผลเพลงแรก</p><button className="smallButton" onClick={() => setView('studio')}>สร้างโปรเจกต์ <Plus size={15}/></button></div>}</section>}
+    {view === 'guide' && <section className="panel guide"><h2>จากเพลงต้นฉบับ สู่พื้นที่ฝึกร้อง</h2><ol><li><b>เข้าสู่ระบบ</b><p>ใช้บัญชี Song Note เพื่อเก็บและเข้าถึงงานของคุณ</p></li><li><b>วางลิงก์หรืออัปโหลด</b><p>ลิงก์ต้องเป็นไฟล์เสียงโดยตรงจากโดเมนที่ผู้ดูแลอนุญาต YouTube ใช้ได้เมื่อผู้ดูแลเปิดนำเข้า และวิดีโอต้องเข้าถึงแบบสาธารณะได้ ส่วน Spotify ให้ใช้ไฟล์ต้นฉบับแทน</p></li><li><b>รอผลแยกเสียง</b><p>ระบบใช้ Demucs แยกเสียงร้องและดนตรี จากนั้น Whisper ถอดคำร้อง งานอาจใช้เวลาหลายนาทีตามเครื่องและความยาวเพลง</p></li><li><b>เปิดเพลงและตามเนื้อร้อง</b><p>เลือกเสียงร้องหรือดนตรี คลิกบรรทัดเพื่อเลื่อนไปยังเวลาเพลง เนื้อร้องแบ่งหน้าละ 6 บรรทัดอัตโนมัติ ไม่จำกัดจำนวนหน้า</p></li><li><b>นำเข้าและส่งออก LRC</b><p>นำเข้าเนื้อร้องที่แก้ไขแล้วได้ และส่งออกไฟล์พร้อมเวลา การแก้ผ่าน LRC ในหน้านี้ใช้เฉพาะรอบการเปิดปัจจุบัน</p></li></ol></section>}
+    <footer className="pageFooter"><span>songnote studio</span><span>A little space. An endless soundtrack.</span></footer></main></div>;
 }
-function HomeView({onPlay}:{onPlay:(s:Song)=>void}){return <section><p className="eyebrow">Good evening</p><h1>What do you want to hear?</h1><div className="hero"><img src={songs[0].image}/><div className="shade"/><div className="heroText"><p className="eyebrow"><Sparkles size={13}/> Continue listening</p><h2>Moonlit Echoes</h2><p>Luna Vale · Aurora Sessions</p><div><button className="primary" onClick={()=>onPlay(songs[0])}><Play size={16} fill="currentColor"/> Play</button><button className="secondary circle"><Heart size={17}/></button></div></div></div><Section title="Recently played"><div className="grid">{songs.slice(0,4).map(s=><Card key={s.title} song={s} onPlay={onPlay}/>)}</div></Section><Section title="Trending now"><div className="rows">{songs.slice(0,4).map((s,i)=><Row key={s.title} song={s} n={i+1} onPlay={onPlay}/>)}</div></Section></section>}
-function SearchView({query,setQuery,songs,onPlay}:{query:string;setQuery:(v:string)=>void;songs:Song[];onPlay:(s:Song)=>void}){return <section><h1>Search</h1><div className="search"><Search size={19}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Songs, artists, albums, playlists"/>{query&&<button onClick={()=>setQuery('')}><X size={17}/></button>}</div>{!query?<><Section title="Explore by mood"><div className="moods"><div>Calm</div><div>After dark</div><div>Sing along</div></div></Section></>:<div className="rows top">{songs.length?songs.map((s,i)=><Row key={s.id||s.youtubeVideoId||s.title} song={s} n={i+1} onPlay={onPlay}/>):<div style={{padding:'24px 0',opacity:.65}}>No songs found.</div>}</div>}</section>}
-function LibraryView({songs,onPlay,onAdd}:{songs:Song[];onPlay:(s:Song)=>void;onAdd:()=>void}){return <section><div className="sectionHead"><div><p className="eyebrow">Your collection</p><h1>Library</h1></div><button className="primary" onClick={onAdd}><Plus size={17}/> Add Music</button></div><Section title="All songs"><div className="grid">{songs.map(s=><Card key={s.id||s.youtubeVideoId||s.title} song={s} onPlay={onPlay}/>)}</div></Section></section>}
-function Karaoke({song,onEnd}:{song:Song;onEnd:()=>void}){return <div className="kStage"><div className="aurora"/><header><button className="iconBtn" onClick={onEnd}>‹</button><div><b>Karaoke</b><span>{song.title} · {song.artist}</span></div><button className="iconBtn"><MoreHorizontal/></button></header><div className="kLyric"><p>แม้เวลาจะผ่านไปนานเท่าไร</p><h2><span>ฉันยัง</span> <em>รอเธอ</em> <span>อยู่ตรงนี้</span></h2><p>I’m still waiting right here</p></div><div className="wave">{Array.from({length:38}).map((_,i)=><i key={i} style={{height:(14+((i*29)%42))+'px'}}/>)}</div><footer><button className="secondary circle"><Shuffle/></button><button className="primary circle big" onClick={onEnd}><Pause fill="currentColor"/></button><button className="secondary circle"><Repeat2/></button></footer></div>}
-function Card({song,onPlay}:{song:Song;onPlay:(s:Song)=>void}){return <article className="card" onClick={()=>onPlay(song)}><div className="cover"><div className="vinyl"/><img src={song.image}/><button className="play"><Play size={16} fill="currentColor"/></button></div><b>{song.title}</b><span>{song.artist}</span></article>}
-function Row({song,n,onPlay}:{song:Song;n:number;onPlay:(s:Song)=>void}){return <div className="row" onClick={()=>onPlay(song)}><small>{String(n).padStart(2,'0')}</small><img src={song.image}/><div><b>{song.title}</b><span>{song.artist}</span></div><span className="note">{song.note}</span><small>3:{12+n}</small><MoreHorizontal size={17}/></div>}
-function Section({title,children}:{title:string;children:React.ReactNode}){return <section className="sub"><div className="sectionTitle"><h2>{title}</h2><button className="ghost">See all <ChevronRight size={16}/></button></div>{children}</section>}
-function Player({song,playing,onToggle,onLyrics,onKaraoke,hasRealAudio,unavailable,progress}:{song:Song;playing:boolean;onToggle:()=>void;onLyrics:()=>void;onKaraoke:()=>void;hasRealAudio:boolean;unavailable:boolean;progress:{currentTime:number;duration:number}}){
- const pct = hasRealAudio && progress.duration > 0 ? Math.min(100, (progress.currentTime / progress.duration) * 100) : 0;
- return <div className="player"><div className="now"><img src={song.image}/><div><b>{song.title}</b><span>{unavailable?'Playback unavailable':!hasRealAudio?'Preview not available':song.artist}</span></div><Heart size={17}/></div><div className="controls"><div><button><SkipBack/></button><button className="primary circle" onClick={onToggle} disabled={!hasRealAudio} style={{opacity:hasRealAudio?1:.5,cursor:hasRealAudio?'pointer':'not-allowed'}} title={hasRealAudio?undefined:'This track has no playable audio source'}>{playing?<Pause fill="currentColor"/>:<Play fill="currentColor"/>}</button><button><SkipForward/></button></div><div className="progress"><span>{hasRealAudio?formatTime(progress.currentTime):'0:00'}</span><div><i style={{width:`${pct}%`}}/></div><span>{hasRealAudio?formatTime(progress.duration):'--:--'}</span></div></div><div className="right"><button className="ghost" onClick={onLyrics}><Sparkles/> Lyrics</button><button className="ghost" onClick={onKaraoke}><Mic2/></button><Volume2 size={16}/></div></div>
-}
-
 createRoot(document.getElementById('root')!).render(<App/>);
